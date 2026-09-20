@@ -15,4 +15,11 @@ object ReadLogsPermission {
 
     fun adbCommand(context: Context): String =
         "adb shell pm grant ${context.packageName} $PERMISSION"
+
+    /** Lets the notification listener see the content of notifications Android marks as sensitive. */
+    fun sensitiveNotificationsCommand(context: Context): String =
+        "adb shell appops set ${context.packageName} RECEIVE_SENSITIVE_NOTIFICATIONS allow"
+
+    fun allCommands(context: Context): String =
+        adbCommand(context) + "\n" + sensitiveNotificationsCommand(context)
 }

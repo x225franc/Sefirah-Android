@@ -251,7 +251,7 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    val readLogsAdbCommand: String get() = ReadLogsPermission.adbCommand(context)
+    val readLogsAdbCommand: String get() = ReadLogsPermission.allCommands(context)
 
     /** Tries `pm grant READ_LOGS` through Shizuku; [onResult] is called with whether it worked. */
     fun grantReadLogsViaShizuku(onResult: (Boolean) -> Unit) {
