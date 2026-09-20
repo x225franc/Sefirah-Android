@@ -141,6 +141,16 @@ class PreferencesRepositoryImpl @Inject constructor(
         }
     }
 
+    override suspend fun saveLogcatClipboardEnabled(enabled: Boolean) {
+        LOGCAT_CLIPBOARD_ENABLED.update(enabled)
+    }
+
+    override fun readLogcatClipboardEnabled(): Flow<Boolean> {
+        return datastore.data.map { preferences ->
+            preferences[LOGCAT_CLIPBOARD_ENABLED] == true
+        }
+    }
+
     override suspend fun saveMessageSyncSettingsForDevice(deviceId: String, messageSync: Boolean) {
         deviceMessageSyncKey(deviceId).update(messageSync)
     }
@@ -291,6 +301,7 @@ class PreferencesRepositoryImpl @Inject constructor(
         val TRUST_ALL_NETWORKS = booleanPreferencesKey("trustAllNetworks")
         val SHOW_ACTION_LABELS = booleanPreferencesKey("showActionLabels")
         val CLIPBOARD_WORKER_ENABLED = booleanPreferencesKey("clipboardWorkerEnabled")
+        val LOGCAT_CLIPBOARD_ENABLED = booleanPreferencesKey("logcatClipboardEnabled")
 
         fun permissionRequestedKey(permission: String) = booleanPreferencesKey("permission_requested_$permission")
         fun deviceClipboardSyncKey(deviceId: String) = booleanPreferencesKey("clipboardSync_$deviceId")

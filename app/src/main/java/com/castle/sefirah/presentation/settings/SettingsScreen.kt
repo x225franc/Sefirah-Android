@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.compose.ManagedActivityResultLauncher
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -45,6 +46,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.NavHostController
 import com.castle.sefirah.navigation.SettingsRouteScreen
 import com.castle.sefirah.presentation.settings.components.LogoHeader
+import com.castle.sefirah.presentation.settings.components.ReadLogsPermissionDialog
 import com.castle.sefirah.presentation.settings.components.SwitchPreferenceWidget
 import com.castle.sefirah.presentation.settings.components.TextPreferenceWidget
 import com.castle.sefirah.util.CrashLogUtil
@@ -69,6 +71,8 @@ fun SettingsScreen(
     val localDevice by viewModel.localDevice.collectAsState()
     val showActionLabels by viewModel.showActionLabels.collectAsState()
     val clipboardWorkerEnabled by viewModel.clipboardWorkerEnabled.collectAsState()
+    val logcatClipboardEnabled by viewModel.logcatClipboardEnabled.collectAsState()
+    var showReadLogsDialog by remember { mutableStateOf(false) }
 
     // State for device name dialog
     var showDeviceNameDialog by remember { mutableStateOf(false) }
@@ -210,6 +214,30 @@ fun SettingsScreen(
                     onCheckedChanged = viewModel::saveClipboardWorkerEnabled,
                 )
             }
+
+            item {
+                SwitchPreferenceWidget(
+                    title = stringResource(R.string.clipboard_logcat_preference),
+                    subtitle = stringResource(R.string.clipboard_logcat_subtitle),
+                    icon = ImageVector.vectorResource(R.drawable.ic_content_copy),
+                    checked = logcatClipboardEnabled,
+                    onCheckedChanged = { enabled ->
+                        viewModel.saveLogcatClipboardEnabled(enabled)
+                        if (enabled && !permissionStates.readLogsGranted) showReadLogsDialog = true
+                    },
+                )
+            }
+
+            if (logcatClipboardEnabled && !permissionStates.readLogsGranted) {
+                item {
+                    TextPreferenceWidget(
+                        title = stringResource(R.string.clipboard_logcat_grant_preference),
+                        subtitle = stringResource(R.string.clipboard_logcat_grant_subtitle),
+                        icon = ImageVector.vectorResource(R.drawable.ic_settings_alert_fill),
+                        onPreferenceClick = { showReadLogsDialog = true },
+                    )
+                }
+            }
         }
 
         item {
@@ -265,6 +293,23 @@ fun SettingsScreen(
                 }
             )
         }
+    }
+
+    if (showReadLogsDialog) {
+        ReadLogsPermissionDialog(
+            adbCommand = viewModel.readLogsAdbCommand,
+            shizukuAvailable = permissionStates.shizukuGranted,
+            onGrantWithShizuku = {
+                viewModel.grantReadLogsViaShizuku { granted ->
+                    if (granted) {
+                        showReadLogsDialog = false
+                    } else {
+                        Toast.makeText(context, R.string.read_logs_shizuku_failed, Toast.LENGTH_LONG).show()
+                    }
+                }
+            },
+            onDismiss = { showReadLogsDialog = false },
+        )
     }
 
     // Device Name Dialog

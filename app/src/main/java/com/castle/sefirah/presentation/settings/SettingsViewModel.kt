@@ -18,6 +18,9 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import sefirah.clipboard.ClipboardAccessibilityService
+import sefirah.clipboard.ClipboardFeature
+import sefirah.clipboard.ReadLogsPermission
+import sefirah.worker.WorkerManager
 import sefirah.worker.ShizukuHelper
 import sefirah.common.util.PermissionStates
 import sefirah.common.util.checkBatteryOptimization
@@ -48,6 +51,8 @@ class SettingsViewModel @Inject constructor(
     private val appRepository: AppRepository,
     private val networkManager: NetworkManager,
     networkDiscovery: NetworkDiscovery,
+    private val clipboardFeature: ClipboardFeature,
+    private val workerManager: WorkerManager,
     deviceManager: DeviceManager,
     application: Application
 ) : AndroidViewModel(application) {
@@ -68,6 +73,10 @@ class SettingsViewModel @Inject constructor(
     val clipboardWorkerEnabled: StateFlow<Boolean> = preferencesRepository
         .readClipboardWorkerEnabled()
         .stateIn(viewModelScope, SharingStarted.Lazily, true)
+
+    val logcatClipboardEnabled: StateFlow<Boolean> = preferencesRepository
+        .readLogcatClipboardEnabled()
+        .stateIn(viewModelScope, SharingStarted.Lazily, false)
 
     private val _storageLocation = MutableStateFlow("")
     val storageLocation: StateFlow<String> = _storageLocation
@@ -124,6 +133,8 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun updatePermissionStates() {
+        // Also picks up READ_LOGS granted from a computer while the app was in the background.
+        clipboardFeature.refreshDetectors()
         viewModelScope.launch {
             val clearPermission: (String) -> Unit = { permission ->
                 clearPermissionRequested(permission)
@@ -151,7 +162,8 @@ class SettingsViewModel @Inject constructor(
                 smsPermissionGranted = smsGranted,
                 contactsGranted = contactsGranted,
                 phoneStateGranted = phoneStateGranted,
-                callLogsGranted = callLogsGranted
+                callLogsGranted = callLogsGranted,
+                readLogsGranted = ReadLogsPermission.isGranted(context),
             )
         }
     }
@@ -215,6 +227,23 @@ class SettingsViewModel @Inject constructor(
     fun saveClipboardWorkerEnabled(enabled: Boolean) {
         viewModelScope.launch {
             preferencesRepository.saveClipboardWorkerEnabled(enabled)
+        }
+    }
+
+    fun saveLogcatClipboardEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.saveLogcatClipboardEnabled(enabled)
+        }
+    }
+
+    val readLogsAdbCommand: String get() = ReadLogsPermission.adbCommand(context)
+
+    /** Tries `pm grant READ_LOGS` through Shizuku; [onResult] is called with whether it worked. */
+    fun grantReadLogsViaShizuku(onResult: (Boolean) -> Unit) {
+        workerManager.grantPermissionViaShizuku(ReadLogsPermission.PERMISSION) { granted ->
+            updatePermissionStates()
+            if (granted) clipboardFeature.refreshDetectors()
+            onResult(granted)
         }
     }
 

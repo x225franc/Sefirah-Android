@@ -178,6 +178,44 @@ class WorkerManager @Inject constructor(
         Shizuku.bindUserService(args, connection)
     }
 
+    /**
+     * Grants [permission] to this app through a Shizuku shell user service (equivalent to
+     * `adb shell pm grant <package> <permission>`). [onResult] gets false if Shizuku is unavailable.
+     * Note: the system may restart the app process when the grant succeeds.
+     */
+    fun grantPermissionViaShizuku(permission: String, onResult: (Boolean) -> Unit) {
+        if (!ShizukuHelper.isAuthorized()) {
+            onResult(false)
+            return
+        }
+        val args = userServiceArgs
+        val connection = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+                val granted = try {
+                    IWorkerLauncherService.Stub.asInterface(service).grantPermission(permission)
+                } catch (e: Exception) {
+                    Log.e(TAG, "grantPermission failed", e)
+                    false
+                }
+                Log.i(TAG, "Shizuku grant $permission -> $granted")
+                try {
+                    Shizuku.unbindUserService(args, this, true)
+                } catch (e: Exception) {
+                    Log.w(TAG, "unbindUserService failed", e)
+                }
+                onResult(granted)
+            }
+
+            override fun onServiceDisconnected(name: ComponentName?) {}
+        }
+        try {
+            Shizuku.bindUserService(args, connection)
+        } catch (e: Exception) {
+            Log.e(TAG, "bindUserService failed", e)
+            onResult(false)
+        }
+    }
+
     private fun userServiceArgs(): Shizuku.UserServiceArgs {
         val version = try {
             val info = context.packageManager.getPackageInfo(context.packageName, 0)

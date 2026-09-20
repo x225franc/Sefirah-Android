@@ -45,6 +45,30 @@ class WorkerLauncherUserService : IWorkerLauncherService.Stub {
         }
     }
 
+    override fun grantPermission(permission: String): Boolean {
+        if (!::context.isInitialized) {
+            Log.e(TAG, "grantPermission missing context")
+            return false
+        }
+        val process = Runtime.getRuntime().exec(arrayOf("pm", "grant", context.packageName, permission))
+        return try {
+            val code = process.waitFor()
+            if (code != 0) {
+                val err = process.errorStream.bufferedReader().use { it.readText() }
+                Log.w(TAG, "pm grant $permission exit=$code err=$err")
+            }
+            code == 0
+        } catch (e: Exception) {
+            Log.w(TAG, "pm grant $permission failed", e)
+            false
+        } finally {
+            try {
+                process.destroy()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     private fun isWorkerProcessRunning(): Boolean {
         val process = Runtime.getRuntime().exec(arrayOf("pidof", WorkerManager.NICE_NAME))
         return try {

@@ -7,6 +7,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
 import dagger.Lazy
@@ -41,6 +42,7 @@ class ClipboardFeature @Inject constructor(
     private val preferencesRepository: PreferencesRepository,
     private val fileTransferService: Lazy<FileTransferService>,
     private val workerManager: WorkerManager,
+    private val logcatWatcher: LogcatClipboardWatcher,
 ) : Feature(deviceManager) {
     private val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -49,11 +51,25 @@ class ClipboardFeature @Inject constructor(
         scope.launch { sendPrimaryClipboard() }
     }
 
+    @Volatile private var logcatEnabled = false
+    @Volatile private var listenerRegistered = false
+    private var lastInboundSetAt = 0L
+    private var lastLogcatTriggerAt = 0L
+    private var lastSentText: String? = null
+    private var lastSentAt = 0L
+    private var lastSentClipStamp = 0L
+
     init {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             scope.launch {
                 preferencesRepository.readClipboardWorkerEnabled().collect {
                     applyWorkerState(it)
+                }
+            }
+            scope.launch {
+                preferencesRepository.readLogcatClipboardEnabled().collect {
+                    logcatEnabled = it
+                    refreshDetectors()
                 }
             }
         }
@@ -71,18 +87,70 @@ class ClipboardFeature @Inject constructor(
 
     override suspend fun onStart(deviceId: String) {
         if (enabledDevices.size != 1) return
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            clipboardManager.addPrimaryClipChangedListener(clipChangedListener)
-        } else {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             applyWorkerState(preferencesRepository.readClipboardWorkerEnabled().first())
         }
+        refreshDetectors()
     }
 
     override suspend fun onStop(deviceId: String) {
         if (enabledDevices.isNotEmpty()) return
-        clipboardManager.removePrimaryClipChangedListener(clipChangedListener)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             workerManager.stopClipboardWatcher()
+        }
+        refreshDetectors()
+    }
+
+    /**
+     * Starts/stops the in-app change detectors from the current state. Also called after READ_LOGS gets
+     * granted. Below Android 10 the plain listener is enough; from 10 on the listener is only kept so
+     * ClipboardService logs a denial line naming us, which [LogcatClipboardWatcher] turns into a trigger.
+     */
+    @Synchronized
+    fun refreshDetectors() {
+        val active = enabledDevices.isNotEmpty()
+        val useLogcat = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && logcatEnabled && active
+        if (useLogcat) {
+            if (!logcatWatcher.start(::onLogcatClipboardChange)) {
+                Log.w(TAG, "Logcat detection enabled but READ_LOGS is missing")
+            }
+        } else {
+            logcatWatcher.stop()
+        }
+
+        val wantListener = active && (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || logcatEnabled)
+        if (wantListener && !listenerRegistered) {
+            clipboardManager.addPrimaryClipChangedListener(clipChangedListener)
+            listenerRegistered = true
+        } else if (!wantListener && listenerRegistered) {
+            clipboardManager.removePrimaryClipChangedListener(clipChangedListener)
+            listenerRegistered = false
+        }
+    }
+
+    private fun onLogcatClipboardChange() {
+        scope.launch {
+            val now = SystemClock.elapsedRealtime()
+            when {
+                workerManager.isWorkerAlive() -> return@launch // worker already reports changes
+                now - lastInboundSetAt < INBOUND_ECHO_WINDOW_MS -> return@launch // our own setPrimaryClip
+                now - lastLogcatTriggerAt < LOGCAT_COOLDOWN_MS || ClipboardChangeActivity.isRunning ->
+                    return@launch
+            }
+            lastLogcatTriggerAt = now
+            Log.d(TAG, "Clipboard change detected via logcat")
+
+            // No filter on ClipDescription.EXTRA_IS_SENSITIVE on purpose: sensitive clips are synced too.
+            if (sendPrimaryClipboard()) {
+                Log.d(TAG, "Read clipboard without focus")
+                return@launch
+            }
+            Log.d(TAG, "Background read returned nothing, launching focus activity")
+            try {
+                ClipboardChangeActivity.launch(context)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to launch ClipboardChangeActivity", e)
+            }
         }
     }
 
@@ -126,6 +194,7 @@ class ClipboardFeature @Inject constructor(
                 else -> ClipData.newPlainText("Received clipboard", clipboard.content)
             }
             suppressOutbound()
+            lastInboundSetAt = SystemClock.elapsedRealtime()
             clipboardManager.setPrimaryClip(clip)
         } catch (ex: Exception) {
             Log.e(TAG, "Exception handling clipboard", ex)
@@ -137,6 +206,7 @@ class ClipboardFeature @Inject constructor(
     fun setClipboardUri(uri: Uri) {
         try {
             suppressOutbound()
+            lastInboundSetAt = SystemClock.elapsedRealtime()
             val clip = ClipData.newUri(context.contentResolver, "Received file", uri)
             clipboardManager.setPrimaryClip(clip)
         } catch (ex: Exception) {
@@ -167,20 +237,38 @@ class ClipboardFeature @Inject constructor(
 
 
     @SuppressLint("Recycle")
-    suspend fun sendPrimaryClipboard() {
-        if (suppressOutbound) return
+    suspend fun sendPrimaryClipboard(): Boolean {
+        if (suppressOutbound) return false
 
-        val clip = clipboardManager.primaryClip
+        val clip = try {
+            clipboardManager.primaryClip
+        } catch (e: SecurityException) {
+            Log.d(TAG, "Clipboard read denied", e)
+            null
+        }
         if (clip == null || clip.itemCount == 0) {
-            return
+            return false
+        }
+
+        // Several detectors (listener, logcat, accessibility) can fire for the same copy. Each
+        // setPrimaryClip gets its own timestamp, so the same one means the same copy, however late.
+        val stamp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) clip.description.timestamp else 0L
+        if (stamp != 0L && stamp == lastSentClipStamp) {
+            Log.d(TAG, "Clip $stamp already sent, skipping")
+            return true
         }
 
         val item = clip.getItemAt(0)
 
         val text = item.text?.toString()
         if (!text.isNullOrEmpty()) {
+            val now = SystemClock.elapsedRealtime()
+            if (stamp == 0L && text == lastSentText && now - lastSentAt < DUPLICATE_WINDOW_MS) return true
+            lastSentClipStamp = stamp
+            lastSentText = text
+            lastSentAt = now
             sendClipboard(ClipboardInfo("text/plain", text))
-            return
+            return true
         }
 
         val uri = item.uri
@@ -194,14 +282,17 @@ class ClipboardFeature @Inject constructor(
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to open clipboard image: $uri", e)
-                return
+                return false
             }
             if (pfd == null) {
                 Log.e(TAG, "Failed to open clipboard image: $uri")
-                return
+                return false
             }
+            lastSentClipStamp = stamp
             sendClipboardImage(mime, pfd)
+            return true
         }
+        return false
     }
 
     /**
@@ -302,5 +393,8 @@ class ClipboardFeature @Inject constructor(
         private const val TAG = "ClipboardFeature"
         private const val DIRECT_TRANSFER_THRESHOLD = 2 * 1024 * 1024 // 2MB
         private const val MAX_CLIPBOARD_IMAGE_BYTES = 32L * 1024 * 1024
+        private const val INBOUND_ECHO_WINDOW_MS = 3_000L
+        private const val LOGCAT_COOLDOWN_MS = 1_500L
+        private const val DUPLICATE_WINDOW_MS = 1_000L
     }
 }
