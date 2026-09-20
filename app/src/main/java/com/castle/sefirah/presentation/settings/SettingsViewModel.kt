@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 import sefirah.clipboard.ClipboardAccessibilityService
 import sefirah.clipboard.ClipboardFeature
 import sefirah.clipboard.ReadLogsPermission
+import sefirah.screenshot.ScreenshotFeature
 import sefirah.worker.WorkerManager
 import sefirah.worker.ShizukuHelper
 import sefirah.common.util.PermissionStates
@@ -52,6 +53,7 @@ class SettingsViewModel @Inject constructor(
     private val networkManager: NetworkManager,
     networkDiscovery: NetworkDiscovery,
     private val clipboardFeature: ClipboardFeature,
+    private val screenshotFeature: ScreenshotFeature,
     private val workerManager: WorkerManager,
     deviceManager: DeviceManager,
     application: Application
@@ -77,6 +79,12 @@ class SettingsViewModel @Inject constructor(
     val logcatClipboardEnabled: StateFlow<Boolean> = preferencesRepository
         .readLogcatClipboardEnabled()
         .stateIn(viewModelScope, SharingStarted.Lazily, false)
+
+    val screenshotSyncEnabled: StateFlow<Boolean> = preferencesRepository
+        .readScreenshotSyncEnabled()
+        .stateIn(viewModelScope, SharingStarted.Lazily, false)
+
+    val screenshotPermission: String get() = ScreenshotFeature.mediaPermission()
 
     private val _storageLocation = MutableStateFlow("")
     val storageLocation: StateFlow<String> = _storageLocation
@@ -135,6 +143,7 @@ class SettingsViewModel @Inject constructor(
     fun updatePermissionStates() {
         // Also picks up READ_LOGS granted from a computer while the app was in the background.
         clipboardFeature.refreshDetectors()
+        screenshotFeature.refresh()
         viewModelScope.launch {
             val clearPermission: (String) -> Unit = { permission ->
                 clearPermissionRequested(permission)
@@ -227,6 +236,12 @@ class SettingsViewModel @Inject constructor(
     fun saveClipboardWorkerEnabled(enabled: Boolean) {
         viewModelScope.launch {
             preferencesRepository.saveClipboardWorkerEnabled(enabled)
+        }
+    }
+
+    fun saveScreenshotSyncEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.saveScreenshotSyncEnabled(enabled)
         }
     }
 

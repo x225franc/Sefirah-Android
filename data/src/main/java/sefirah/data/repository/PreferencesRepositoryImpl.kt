@@ -151,6 +151,16 @@ class PreferencesRepositoryImpl @Inject constructor(
         }
     }
 
+    override suspend fun saveScreenshotSyncEnabled(enabled: Boolean) {
+        SCREENSHOT_SYNC_ENABLED.update(enabled)
+    }
+
+    override fun readScreenshotSyncEnabled(): Flow<Boolean> {
+        return datastore.data.map { preferences ->
+            preferences[SCREENSHOT_SYNC_ENABLED] == true
+        }
+    }
+
     override suspend fun saveMessageSyncSettingsForDevice(deviceId: String, messageSync: Boolean) {
         deviceMessageSyncKey(deviceId).update(messageSync)
     }
@@ -302,6 +312,7 @@ class PreferencesRepositoryImpl @Inject constructor(
         val SHOW_ACTION_LABELS = booleanPreferencesKey("showActionLabels")
         val CLIPBOARD_WORKER_ENABLED = booleanPreferencesKey("clipboardWorkerEnabled")
         val LOGCAT_CLIPBOARD_ENABLED = booleanPreferencesKey("logcatClipboardEnabled")
+        val SCREENSHOT_SYNC_ENABLED = booleanPreferencesKey("screenshotSyncEnabled")
 
         fun permissionRequestedKey(permission: String) = booleanPreferencesKey("permission_requested_$permission")
         fun deviceClipboardSyncKey(deviceId: String) = booleanPreferencesKey("clipboardSync_$deviceId")

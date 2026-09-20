@@ -72,6 +72,7 @@ fun SettingsScreen(
     val showActionLabels by viewModel.showActionLabels.collectAsState()
     val clipboardWorkerEnabled by viewModel.clipboardWorkerEnabled.collectAsState()
     val logcatClipboardEnabled by viewModel.logcatClipboardEnabled.collectAsState()
+    val screenshotSyncEnabled by viewModel.screenshotSyncEnabled.collectAsState()
     var showReadLogsDialog by remember { mutableStateOf(false) }
 
     // State for device name dialog
@@ -238,6 +239,19 @@ fun SettingsScreen(
                     )
                 }
             }
+        }
+
+        item {
+            SwitchPermissionPrefWidget(
+                title = stringResource(R.string.screenshot_sync_preference),
+                subtitle = stringResource(R.string.screenshot_sync_subtitle),
+                icon = ImageVector.vectorResource(R.drawable.ic_content_copy),
+                checked = screenshotSyncEnabled,
+                permission = viewModel.screenshotPermission,
+                onRequest = { permissionRequester.launch(viewModel.screenshotPermission) },
+                onCheckedChanged = viewModel::saveScreenshotSyncEnabled,
+                viewModel = viewModel,
+            )
         }
 
         item {

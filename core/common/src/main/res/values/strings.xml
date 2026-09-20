@@ -133,6 +133,8 @@
     <string name="read_logs_shizuku_failed">Shizuku could not grant the permission. Use the ADB command instead.</string>
     <string name="read_logs_granted">READ_LOGS granted</string>
     <string name="done">Done</string>
+    <string name="screenshot_sync_preference">Sync screenshots</string>
+    <string name="screenshot_sync_subtitle">Send every new screenshot to the connected computer automatically. Needs access to your photos.</string>
     <string name="image_clipboard_preference">Add received Images to clipboard</string>
     <string name="image_clipboard_subtitle">Copies the receiving image files to your clipboard</string>
     <string name="notification_sync_preference">Sync notifications</string>

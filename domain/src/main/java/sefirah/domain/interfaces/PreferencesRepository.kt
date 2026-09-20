@@ -43,6 +43,9 @@ interface PreferencesRepository {
 
     suspend fun saveLogcatClipboardEnabled(enabled: Boolean)
     fun readLogcatClipboardEnabled(): Flow<Boolean>
+
+    suspend fun saveScreenshotSyncEnabled(enabled: Boolean)
+    fun readScreenshotSyncEnabled(): Flow<Boolean>
     
     suspend fun saveMessageSyncSettingsForDevice(deviceId: String, messageSync: Boolean)
     fun readMessageSyncSettingsForDevice(deviceId: String): Flow<Boolean>

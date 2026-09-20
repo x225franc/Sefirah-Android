@@ -33,6 +33,7 @@ import sefirah.network.NetworkManagerImpl
 import sefirah.network.SocketFactoryImpl
 import sefirah.notification.NotificationFeature
 import sefirah.playsound.PlaySoundFeature
+import sefirah.screenshot.ScreenshotFeature
 import sefirah.status.RemoteDeviceStatusFeature
 import sefirah.storage.SftpFeature
 import javax.inject.Singleton
@@ -96,6 +97,10 @@ internal abstract class AppModule {
     @Binds
     @IntoSet
     abstract fun bindPlaySoundFeature(feature: PlaySoundFeature): Feature
+
+    @Binds
+    @IntoSet
+    abstract fun bindScreenshotFeature(feature: ScreenshotFeature): Feature
 
     companion object {
         @Provides

@@ -295,6 +295,20 @@ class ClipboardFeature @Inject constructor(
         return false
     }
 
+    /** Sends the image at [uri] (e.g. a screenshot from MediaStore) through the clipboard image path. */
+    suspend fun sendImageUri(uri: Uri): Boolean {
+        if (enabledDevices.isEmpty()) return false
+        val mime = context.contentResolver.getType(uri) ?: "image/png"
+        val pfd = try {
+            withContext(Dispatchers.IO) { context.contentResolver.openFileDescriptor(uri, "r") }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to open image: $uri", e)
+            null
+        } ?: return false
+        sendClipboardImage(mime, pfd)
+        return true
+    }
+
     /**
      * Image FD from the shell worker or [sendPrimaryClipboard].
      * Known size ≤2MB → base64 [ClipboardInfo]. Larger → [FileTransferService.sendFromPfd].
