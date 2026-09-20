@@ -94,6 +94,8 @@ class NetworkService : Service() {
 
     @Inject lateinit var networkDiscovery: NetworkDiscovery
 
+    @Inject lateinit var connectionWatchdog: ConnectionWatchdog
+
     @Inject lateinit var remotePlaybackFeature: RemotePlaybackFeature
 
     @Inject lateinit var playbackFeature: PlaybackFeature
@@ -245,6 +247,7 @@ class NetworkService : Service() {
 
         scope.launch {
             tcpServerPort = startTcpServer()
+            connectionWatchdog.start(scope, ::connectPaired, ::dropConnectedDevices)
             networkDiscovery.initialize(tcpServerPort)
         }
 
@@ -709,15 +712,27 @@ class NetworkService : Service() {
         }
     }
 
+    /** Closes every live connection without telling the peer (the network under it is gone). */
+    private suspend fun dropConnectedDevices() {
+        deviceManager.pairedDevices.value
+            .filter { it.connectionState.isConnected }
+            .forEach { device ->
+                Log.i(TAG, "Dropping stale connection to ${device.deviceName}")
+                disconnectDevice(device)
+            }
+    }
+
     private val screenOnReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             networkDiscovery.broadcastDevice()
+            connectionWatchdog.retryNow("screen on")
         }
     }
 
     private val wifiStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             networkDiscovery.broadcastDevice()
+            connectionWatchdog.retryNow("wifi state changed")
         }
     }
 
@@ -805,6 +820,7 @@ class NetworkService : Service() {
         deviceControlHandler.stop()
         playSoundFeature.stop()
         networkDiscovery.unregister()
+        connectionWatchdog.stop()
 
         remotePlaybackFeature.release()
         smsFeature.stop()

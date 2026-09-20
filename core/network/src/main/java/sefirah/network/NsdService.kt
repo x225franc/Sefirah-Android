@@ -38,7 +38,7 @@ class NsdService @Inject constructor(val context: Context) {
     init {
         try {
             val wifiManager = context.applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
-            multicastLock = wifiManager.createMulticastLock("SefirahMulticastLock")
+            multicastLock = wifiManager.createMulticastLock("SefirahMulticastLock").apply { setReferenceCounted(false) }
         } catch (e: Exception) {
             Log.e(TAG, "Error acquiring multicast lock", e)
             throw e
@@ -181,6 +181,9 @@ class NsdService @Inject constructor(val context: Context) {
 
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
                 Log.e(TAG, "Discovery failed to start: Error code: $errorCode")
+                // Without this, startDiscovery() sees a non-null listener and never retries.
+                discoveryListener = null
+                try { multicastLock.release() } catch (_: Exception) {}
             }
 
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {

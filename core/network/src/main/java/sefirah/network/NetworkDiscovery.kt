@@ -121,6 +121,23 @@ class NetworkDiscovery @Inject constructor(
         }
     }
 
+    /** True when devices may be contacted on the current network (all trusted, or this one is). */
+    fun isDiscoveryAllowed(): Boolean = trustAllNetworks || discoveryJob?.isActive == true
+
+    /**
+     * Rebinds UDP/mDNS after a network change: sockets and NSD registrations made on the previous
+     * network stay silently dead otherwise. With trusted-networks-only, the Wi-Fi callback decides.
+     */
+    fun restartDiscovery(reason: String) {
+        if (!trustAllNetworks) {
+            Log.d(TAG, "restartDiscovery($reason) ignored: trusted networks mode")
+            return
+        }
+        Log.i(TAG, "Restarting discovery: $reason")
+        stopDiscovery()
+        startDiscovery()
+    }
+
     private fun stopDiscovery() {
         try {
             if (discoveryJob?.isActive == false) return
