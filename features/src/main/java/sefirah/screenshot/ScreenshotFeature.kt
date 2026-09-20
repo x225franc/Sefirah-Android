@@ -170,7 +170,7 @@ class ScreenshotFeature @Inject constructor(
 
     companion object {
         private const val TAG = "ScreenshotFeature"
-        private const val SETTLE_DELAY_MS = 700L
+        private const val SETTLE_DELAY_MS = 150L
         private val SCREENSHOT_MARKERS = listOf("screenshot", "screen_shot", "screen shot", "screencap", "capture d")
 
         /** Runtime permission to request for reading images, by Android version. */
