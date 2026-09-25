@@ -58,6 +58,7 @@ import sefirah.domain.model.Disconnect
 import sefirah.domain.model.DiscoveredDevice
 import sefirah.domain.model.PairMessage
 import sefirah.domain.model.PairedDevice
+import sefirah.domain.model.Ping
 import sefirah.domain.model.PendingDeviceApproval
 import sefirah.domain.model.SocketMessage
 import sefirah.domain.util.MessageSerializer
@@ -247,7 +248,7 @@ class NetworkService : Service() {
 
         scope.launch {
             tcpServerPort = startTcpServer()
-            connectionWatchdog.start(scope, ::connectPaired, ::dropConnectedDevices)
+            connectionWatchdog.start(scope, ::connectPaired, ::dropConnectedDevices, ::sendHeartbeatsAndPruneStale)
             networkDiscovery.initialize(tcpServerPort)
         }
 
@@ -722,6 +723,27 @@ class NetworkService : Service() {
             }
     }
 
+    /**
+     * Sends a [Ping] to every connected paired device and drops connections that haven't
+     * produced any traffic (including the desktop app's own heartbeat) in [STALE_THRESHOLD_MS],
+     * since a dead socket doesn't always surface a read/write error by itself.
+     */
+    private suspend fun sendHeartbeatsAndPruneStale() {
+        val now = System.currentTimeMillis()
+        deviceManager.pairedDevices.value
+            .filter { it.connectionState.isConnected }
+            .forEach { device ->
+                val connection = connections[device.deviceId] ?: return@forEach
+                val silentFor = now - connection.lastActivityMillis
+                if (silentFor > STALE_THRESHOLD_MS) {
+                    Log.w(TAG, "No traffic from ${device.deviceName} for ${silentFor / 1000}s, treating connection as dead")
+                    disconnectDevice(device)
+                } else {
+                    sendMessage(device.deviceId, Ping)
+                }
+            }
+    }
+
     private val screenOnReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             networkDiscovery.broadcastDevice()
@@ -849,5 +871,8 @@ class NetworkService : Service() {
         const val TAG = "NetworkService"
         const val DEVICE_ID_EXTRA = "device_id"
         const val EXTRA_CONNECTION_DETAILS = "extra_connection_details"
+
+        /** Comfortably above both peers' heartbeat interval so a couple of missed beats don't false-positive. */
+        const val STALE_THRESHOLD_MS = 90_000L
     }
 }

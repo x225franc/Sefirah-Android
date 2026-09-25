@@ -26,6 +26,9 @@ import javax.inject.Singleton
  *   network (a TCP socket over a vanished Wi-Fi never reports an error by itself).
  * - Periodically retries every paired device that is disconnected (not by the user), so a missed
  *   mDNS/UDP announcement or a PC that started later is still picked up.
+ * - Periodically sends an application-level heartbeat to every connected device and drops any
+ *   connection that has gone silent, since a dead socket doesn't always surface a read/write
+ *   error by itself (e.g. a NAT mapping that expired while idle).
  * - Logs every decision under the tag [TAG].
  */
 @Singleton
@@ -41,6 +44,7 @@ class ConnectionWatchdog @Inject constructor(
     private var loopJob: Job? = null
     private var connect: (suspend (PairedDevice) -> Unit)? = null
     private var dropConnections: (suspend () -> Unit)? = null
+    private var heartbeat: (suspend () -> Unit)? = null
 
     private val wakeUp = Channel<String>(Channel.CONFLATED)
     private val inFlight = ConcurrentHashMap.newKeySet<String>()
@@ -70,11 +74,13 @@ class ConnectionWatchdog @Inject constructor(
         scope: CoroutineScope,
         connect: suspend (PairedDevice) -> Unit,
         dropConnections: suspend () -> Unit,
+        heartbeat: suspend () -> Unit,
     ) {
         if (loopJob?.isActive == true) return
         this.scope = scope
         this.connect = connect
         this.dropConnections = dropConnections
+        this.heartbeat = heartbeat
 
         try {
             connectivityManager.registerDefaultNetworkCallback(networkCallback)
@@ -92,6 +98,7 @@ class ConnectionWatchdog @Inject constructor(
                     SLOW_INTERVAL_MS
                 }
                 val reason = withTimeoutOrNull(interval) { wakeUp.receive() } ?: "periodic"
+                heartbeat?.invoke()
                 retryPairedDevices(reason)
             }
         }

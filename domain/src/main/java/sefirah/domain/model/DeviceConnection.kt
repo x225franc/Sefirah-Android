@@ -28,6 +28,11 @@ class DeviceConnection(
     private val mutex = Mutex()
     private var listeningJob: Job? = null
 
+    /** Wall-clock time of the last message (including heartbeats) received on this connection. */
+    @Volatile
+    var lastActivityMillis: Long = System.currentTimeMillis()
+        private set
+
     fun sendMessage(message: SocketMessage) {
         scope.launch {
             mutex.withLock {
@@ -69,6 +74,16 @@ class DeviceConnection(
                     try {
                         channel.readUTF8Line()?.let { line ->
                             MessageSerializer.deserialize(line)?.let { socketMessage ->
+                                lastActivityMillis = System.currentTimeMillis()
+
+                                if (socketMessage is Ping) {
+                                    sendMessage(Pong)
+                                    return@let
+                                }
+                                if (socketMessage is Pong) {
+                                    return@let
+                                }
+
                                 val device = getDevice(deviceId) ?: return@let
                                 onMessage(device, socketMessage)
                             }

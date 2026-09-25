@@ -38,6 +38,8 @@ object MessageSerializer {
                 subclass(NotificationInfo::class)
                 subclass(NotificationReply::class)
                 subclass(PairMessage::class)
+                subclass(Ping::class)
+                subclass(Pong::class)
                 subclass(PlaybackInfo::class)
                 subclass(PlaySound::class)
                 subclass(RequestApplicationList::class)

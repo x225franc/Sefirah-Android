@@ -34,6 +34,20 @@ data class RequestWorkerLaunch(
 @SerialName("BluetoothPairingRequest")
 object BluetoothPairingRequest : SocketMessage()
 
+/**
+ * Application-level heartbeat, mirrored on desktop. Sent periodically to a connected peer
+ * to detect dead sockets that never surface a read/write error (e.g. a NAT mapping that
+ * silently expired while idle, or a Wi-Fi network that vanished without a clean FIN).
+ */
+@Serializable
+@SerialName("Ping")
+object Ping : SocketMessage()
+
+/** Reply to [Ping], confirming the connection is alive in both directions. */
+@Serializable
+@SerialName("Pong")
+object Pong : SocketMessage()
+
 @Serializable
 @SerialName("BluetoothPairingResult")
 data class BluetoothPairingResult(
