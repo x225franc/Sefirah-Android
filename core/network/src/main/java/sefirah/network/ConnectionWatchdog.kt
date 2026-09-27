@@ -26,6 +26,10 @@ import javax.inject.Singleton
  *   network (a TCP socket over a vanished Wi-Fi never reports an error by itself).
  * - Periodically retries every paired device that is disconnected (not by the user), so a missed
  *   mDNS/UDP announcement or a PC that started later is still picked up.
+ * - Periodically re-sends our own UDP announcement while any paired device is disconnected, instead
+ *   of only on app start/screen-on/Wi-Fi change. A PC that boots hours after the phone was last
+ *   active (or missed our one-shot announcement) otherwise never hears from us until one of those
+ *   events happens to fire, forcing a manual "refresh" on the desktop side.
  * - Periodically sends an application-level heartbeat to every connected device and drops any
  *   connection that has gone silent, since a dead socket doesn't always surface a read/write
  *   error by itself (e.g. a NAT mapping that expired while idle).
@@ -147,6 +151,10 @@ class ConnectionWatchdog @Inject constructor(
             !it.connectionState.isConnectedOrConnecting && !it.connectionState.isForcedDisconnect
         }
         if (candidates.isEmpty()) return
+
+        // Re-announce ourselves so a PC that just booted (and so never heard our one-shot
+        // startup broadcast) can discover us without the user touching anything.
+        networkDiscovery.broadcastDevice()
 
         val connect = connect ?: return
         candidates.forEach { device ->

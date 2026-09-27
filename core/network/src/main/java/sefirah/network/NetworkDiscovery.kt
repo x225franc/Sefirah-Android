@@ -9,6 +9,7 @@ import android.net.wifi.SupplicantState
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.SystemClock
 import android.os.ext.SdkExtensions
 import android.util.Log
 import io.ktor.network.sockets.BoundDatagramSocket
@@ -71,6 +72,11 @@ class NetworkDiscovery @Inject constructor(
     private var udpPort: Int = 5149
 
     private var trustAllNetworks : Boolean = true
+
+    // A single PC-side broadcast can legitimately reach us more than once (subnet broadcast +
+    // direct address both landing on this device, several known addresses resolving to the same
+    // host, ...). Debounce so a burst doesn't fire off several concurrent connect attempts.
+    private val lastBroadcastHandledAt = HashMap<String, Long>()
 
     private val _currentWifiSsid = MutableStateFlow<String?>(null)
     val currentWifiSsid: StateFlow<String?> = _currentWifiSsid.asStateFlow()
@@ -348,6 +354,12 @@ class NetworkDiscovery @Inject constructor(
 
                 if (udpBroadcast.deviceId == deviceManager.localDevice.deviceId) continue
                 Log.d(TAG, "Received UDP broadcast from ${udpBroadcast.deviceName}")
+
+                val now = SystemClock.elapsedRealtime()
+                val last = lastBroadcastHandledAt[udpBroadcast.deviceId] ?: 0L
+                if (now - last < BROADCAST_DEBOUNCE_MS) continue
+                lastBroadcastHandledAt[udpBroadcast.deviceId] = now
+
                 when (val device = deviceManager.getDevice(udpBroadcast.deviceId)) {
                     is PairedDevice -> {
                          if (device.connectionState.isConnectedOrConnecting || device.connectionState.isForcedDisconnect) continue
@@ -407,5 +419,6 @@ class NetworkDiscovery @Inject constructor(
         private const val TAG = "NetworkDiscovery"
         private const val UNKNOWN_SSID = "<unknown ssid>"
         private const val BROADCAST_RATE_LIMIT_MS = 200L
+        private const val BROADCAST_DEBOUNCE_MS = 3_000L
     }
 }
