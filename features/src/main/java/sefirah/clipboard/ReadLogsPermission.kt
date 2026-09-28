@@ -20,6 +20,14 @@ object ReadLogsPermission {
     fun sensitiveNotificationsCommand(context: Context): String =
         "adb shell appops set ${context.packageName} RECEIVE_SENSITIVE_NOTIFICATIONS allow"
 
+    /** MacroDroid's own package name; grants it the same READ_LOGS access as this app for its
+     * log-based triggers. Unrelated to Sefirah's own permissions, kept here only so it rides along
+     * on the same "commands to run after every reinstall" clipboard copy. */
+    private const val MACRODROID_PACKAGE = "com.arlosoft.macrodroid"
+
+    fun macroDroidReadLogsCommand(): String =
+        "adb shell pm grant $MACRODROID_PACKAGE $PERMISSION"
+
     fun allCommands(context: Context): String =
-        adbCommand(context) + "\n" + sensitiveNotificationsCommand(context)
+        adbCommand(context) + "\n" + sensitiveNotificationsCommand(context) + "\n" + macroDroidReadLogsCommand()
 }
