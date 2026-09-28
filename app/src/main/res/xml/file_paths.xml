@@ -1,9 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <cache-path name="clipboard_cache" path="." />
-    <!-- Lets ScreenshotFeature build a content:// URI for a screenshot file it found directly
-         on disk (FileObserver path), without going through MediaStore. -->
-    <external-path name="screenshots_pictures" path="Pictures/Screenshots/" />
-    <external-path name="screenshots_dcim" path="DCIM/Screenshots/" />
-    <external-path name="screenshots_pictures_alt" path="Pictures/ScreenShots/" />
 </paths>
