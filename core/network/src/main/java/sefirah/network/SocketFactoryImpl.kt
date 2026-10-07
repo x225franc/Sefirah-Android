@@ -7,36 +7,38 @@ import io.ktor.network.sockets.InetSocketAddress
 import io.ktor.network.sockets.aSocket
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CancellationException
 import sefirah.domain.interfaces.SocketFactory
 import sefirah.network.util.SslHelper
 import javax.inject.Inject
 import javax.inject.Singleton
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
-import kotlin.time.Duration.Companion.milliseconds
+import java.net.InetSocketAddress as JavaInetSocketAddress
 
 @Singleton
 class SocketFactoryImpl @Inject constructor() : SocketFactory {
     val selectorManager = SelectorManager(Dispatchers.IO)
 
     override suspend fun tcpClientSocket(address: String, port: Int, certificate: ByteArray?): SSLSocket? {
+        var socket: SSLSocket? = null
         return try {
             Log.d(TAG, "Connecting to $address:$port")
             val sslContext = SslHelper.sslContext(certificate)
-            withTimeoutOrNull(3000L.milliseconds) {
-                withContext(Dispatchers.IO) {
-                    (sslContext.socketFactory.createSocket(address, port) as SSLSocket).apply {
-                        startHandshake()
-                    }
+            withContext(Dispatchers.IO) {
+                (sslContext.socketFactory.createSocket() as SSLSocket).apply {
+                    socket = this
+                    connect(JavaInetSocketAddress(address, port), 3000)
+                    soTimeout = 3000
+                    startHandshake()
+                    soTimeout = 0
                 }
-            }?.also {
+            }.also {
                 Log.d(TAG, "Connected to ${it.remoteSocketAddress}")
-            } ?: run {
-                Log.e(TAG, "Connection timed out to $address:$port")
-                null
             }
         } catch (e: Exception) {
+            runCatching { socket?.close() }
+            if (e is CancellationException) throw e
             Log.e(TAG, "Connection failed to $address:$port", e)
             null
         }

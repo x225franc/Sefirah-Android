@@ -45,7 +45,11 @@ class DeviceConnection(
                         }
                     }
                 } catch (ex: Exception) {
+                    if (ex is CancellationException) throw ex
                     Log.e(TAG, "Failed to send message to $deviceId", ex)
+                    // Closing the socket wakes the reader, whose onClose callback clears
+                    // the connected state and lets the watchdog reconnect.
+                    runCatching { sslSocket?.close() }
                 }
             }
         }
@@ -72,7 +76,8 @@ class DeviceConnection(
             try {
                 while (isActive && !channel.isClosedForRead) {
                     try {
-                        channel.readUTF8Line()?.let { line ->
+                        val line = channel.readUTF8Line() ?: break
+                        line.let {
                             MessageSerializer.deserialize(line)?.let { socketMessage ->
                                 lastActivityMillis = System.currentTimeMillis()
 

@@ -147,7 +147,7 @@ class NetworkService : Service() {
     private var tcpServerSocket: javax.net.ssl.SSLServerSocket? = null
     private var serverAcceptJob: Job? = null
 
-    private val connections = mutableMapOf<String, DeviceConnection>()
+    private val connections = java.util.concurrent.ConcurrentHashMap<String, DeviceConnection>()
 
     private var tcpServerPort by Delegates.notNull<Int>()
 
@@ -733,7 +733,10 @@ class NetworkService : Service() {
         deviceManager.pairedDevices.value
             .filter { it.connectionState.isConnected }
             .forEach { device ->
-                val connection = connections[device.deviceId] ?: return@forEach
+                val connection = connections[device.deviceId] ?: run {
+                    disconnectDevice(device)
+                    return@forEach
+                }
                 val silentFor = now - connection.lastActivityMillis
                 if (silentFor > STALE_THRESHOLD_MS) {
                     Log.w(TAG, "No traffic from ${device.deviceName} for ${silentFor / 1000}s, treating connection as dead")
