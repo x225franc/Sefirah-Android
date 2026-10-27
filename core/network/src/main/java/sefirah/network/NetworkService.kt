@@ -73,6 +73,9 @@ import sefirah.domain.util.MessageSerializer
 import sefirah.domain.util.ConnectionRetryPolicy
 import sefirah.domain.util.HeartbeatAction
 import sefirah.domain.util.acceptIncomingConnection
+import sefirah.domain.util.canResumeConnection
+import sefirah.domain.util.canReplaceSilentConnection
+import sefirah.domain.util.prepareConnectionReplacement
 import sefirah.media.PlaybackFeature
 import sefirah.media.RemotePlaybackFeature
 import sefirah.network.extensions.cancelPairingVerificationNotification
@@ -408,41 +411,31 @@ class NetworkService : Service() {
 
         connectionLock(device.deviceId).withLock {
             val current = deviceManager.getPairedDevice(device.deviceId) ?: return@withLock sslSocket.close()
-            if (manuallyDisconnected.contains(device.deviceId)) {
+            if (!canResumeConnection(
+                    manuallyDisconnected.contains(device.deviceId) || current.connectionState.isForcedDisconnect,
+                    authMessage.userInitiated,
+                )) {
                 sslSocket.close()
                 return@withLock
             }
 
-            var existing = connections[device.deviceId]
-            if (existing != null &&
-                SystemClock.elapsedRealtime() - existing.lastActivityMillis >= STALE_CONNECTION_THRESHOLD_MS
-            ) {
-                Log.i(TAG, "Replacing stale connection from ${device.deviceName} after incoming authentication")
-                connections.remove(device.deviceId, existing)
-                outgoingConnections.remove(device.deviceId)
-                attempts.remove(device.deviceId)?.cancel()
-                existing.close()
-                existing = null
-            }
+            val existing = connections[device.deviceId]
+            val replaceSilent = existing != null && canReplaceSilentConnection(
+                SystemClock.elapsedRealtime() - existing.lastActivityMillis
+            )
 
             if (stopping ||
-                !acceptIncomingConnection(
+                (!replaceSilent && !acceptIncomingConnection(
                     deviceManager.localDevice.deviceId, device.deviceId,
                     attempts.containsKey(device.deviceId),
                     existing?.let { outgoingConnections.contains(device.deviceId) },
-                )
+                ))
             ) {
                 sslSocket.close()
                 return@withLock
             }
 
-            if (authMessage.userInitiated) manuallyDisconnected.remove(device.deviceId)
             val connection = DeviceConnection(device.deviceId, sslSocket, readChannel, writeChannel)
-            if (!connection.sendMessageAndFlush(authenticationMessage())) {
-                connection.close()
-                return@withLock
-            }
-            attempts.remove(device.deviceId)?.cancel()
             val updatedDevice = current.copy(
                 deviceName = authMessage.deviceName,
                 lastConnected = System.currentTimeMillis(),
@@ -452,9 +445,21 @@ class NetworkService : Service() {
                 address = address,
                 connectionState = ConnectionState.Connected,
             )
-            retryPolicy(device.deviceId).reset()
-            deviceManager.addOrUpdatePairedDevice(updatedDevice)
-            installConnection(device.deviceId, connection, outgoing = false)
+            val adopted = prepareConnectionReplacement(
+                candidate = connection,
+                authenticate = { it.sendMessageAndFlush(authenticationMessage()) },
+                commit = { candidate ->
+                    withContext(NonCancellable) {
+                        attempts.remove(device.deviceId)?.cancel()
+                        manuallyDisconnected.remove(device.deviceId)
+                        retryPolicy(device.deviceId).reset()
+                        deviceManager.addOrUpdatePairedDevice(updatedDevice)
+                        installConnection(device.deviceId, candidate, outgoing = false)
+                    }
+                },
+                discard = { it.close() },
+            )
+            if (!adopted) return@withLock
             finalizeConnection(updatedDevice, false)
         }
     }
@@ -717,7 +722,7 @@ class NetworkService : Service() {
     private suspend fun disconnectDeviceLocked(device: PairedDevice, forcedDisconnect: Boolean = false, notifyPeer: Boolean = false) = withContext(NonCancellable) {
         Log.i(TAG, "Disconnected ${device.deviceName}")
         val id = device.deviceId
-        if (forcedDisconnect) manuallyDisconnected.add(id) else manuallyDisconnected.remove(id)
+        if (forcedDisconnect) manuallyDisconnected.add(id)
         attempts.remove(id)?.cancel()
         val connection = connections.remove(id)
         outgoingConnections.remove(id)
@@ -1050,7 +1055,6 @@ class NetworkService : Service() {
 
         val PORT_RANGE = 5150..5169
         const val TAG = "NetworkService"
-        const val STALE_CONNECTION_THRESHOLD_MS = 30_000L
         const val DEVICE_ID_EXTRA = "device_id"
         const val EXTRA_CONNECTION_DETAILS = "extra_connection_details"
 

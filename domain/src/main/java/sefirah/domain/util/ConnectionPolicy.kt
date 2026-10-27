@@ -30,3 +30,28 @@ fun acceptIncomingConnection(
     if (!outgoingAttempt && existingOutgoing == null) return true
     return localId.compareTo(remoteId) > 0
 }
+
+fun canResumeConnection(paused: Boolean, userInitiated: Boolean): Boolean = !paused || userInitiated
+
+// Longer than the desktop idle interval (60s) plus its response window (60s).
+fun canReplaceSilentConnection(silentMillis: Long): Boolean = silentMillis >= 180_000L
+
+/** The old session remains owned until the replacement has completed its handshake. */
+suspend fun <T> prepareConnectionReplacement(
+    candidate: T,
+    authenticate: suspend (T) -> Boolean,
+    commit: suspend (T) -> Unit,
+    discard: (T) -> Unit,
+): Boolean {
+    try {
+        if (!authenticate(candidate)) {
+            discard(candidate)
+            return false
+        }
+        commit(candidate)
+        return true
+    } catch (error: Throwable) {
+        discard(candidate)
+        throw error
+    }
+}
