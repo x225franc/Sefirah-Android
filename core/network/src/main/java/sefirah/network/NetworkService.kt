@@ -163,6 +163,7 @@ class NetworkService : Service() {
     private val outgoingConnections = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val attempts = java.util.concurrent.ConcurrentHashMap<String, ConnectionAttempt>()
     private val retryPolicies = java.util.concurrent.ConcurrentHashMap<String, ConnectionRetryPolicy>()
+    private val manuallyDisconnected = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     @Volatile private var stopping = false
 
     private class ConnectionAttempt {
@@ -408,7 +409,9 @@ class NetworkService : Service() {
         connectionLock(device.deviceId).withLock {
             val current = deviceManager.getPairedDevice(device.deviceId) ?: return@withLock sslSocket.close()
             val existing = connections[device.deviceId]
-            if (stopping || (current.connectionState.isForcedDisconnect && !authMessage.userInitiated) ||
+            if (stopping ||
+                ((!authMessage.userInitiated || manuallyDisconnected.contains(device.deviceId)) &&
+                    (current.connectionState.isForcedDisconnect || manuallyDisconnected.contains(device.deviceId))) ||
                 !acceptIncomingConnection(
                     deviceManager.localDevice.deviceId, device.deviceId,
                     attempts.containsKey(device.deviceId),
@@ -419,6 +422,7 @@ class NetworkService : Service() {
                 return@withLock
             }
 
+            if (authMessage.userInitiated) manuallyDisconnected.remove(device.deviceId)
             val connection = DeviceConnection(device.deviceId, sslSocket, readChannel, writeChannel)
             if (!connection.sendMessageAndFlush(authenticationMessage())) {
                 connection.close()
@@ -477,10 +481,18 @@ class NetworkService : Service() {
             val current = deviceManager.getPairedDevice(device.deviceId) ?: return@withLock null
             if (stopping || connections.containsKey(device.deviceId) || attempts.containsKey(device.deviceId)) return@withLock null
             val policy = retryPolicy(device.deviceId)
-            if (!userInitiated && (current.connectionState.isForcedDisconnect || !policy.canRetry(SystemClock.elapsedRealtime()))) {
+            if (!userInitiated && (
+                current.connectionState.isForcedDisconnect ||
+                    manuallyDisconnected.contains(device.deviceId) ||
+                    !policy.canRetry(SystemClock.elapsedRealtime())
+                )
+            ) {
                 return@withLock null
             }
-            if (userInitiated) policy.reset()
+            if (userInitiated) {
+                manuallyDisconnected.remove(device.deviceId)
+                policy.reset()
+            }
             // Discovery may supply a new port/address, but never let its old state overwrite a user action.
             val target = current.copy(
                 addresses = (device.addresses + current.addresses).distinctBy { it.address },
@@ -691,6 +703,7 @@ class NetworkService : Service() {
     private suspend fun disconnectDeviceLocked(device: PairedDevice, forcedDisconnect: Boolean = false, notifyPeer: Boolean = false) = withContext(NonCancellable) {
         Log.i(TAG, "Disconnected ${device.deviceName}")
         val id = device.deviceId
+        if (forcedDisconnect) manuallyDisconnected.add(id) else manuallyDisconnected.remove(id)
         attempts.remove(id)?.cancel()
         val connection = connections.remove(id)
         outgoingConnections.remove(id)
