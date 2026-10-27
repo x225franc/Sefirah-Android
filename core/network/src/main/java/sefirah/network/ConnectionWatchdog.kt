@@ -7,6 +7,7 @@ import android.net.NetworkCapabilities
 import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
@@ -56,6 +57,7 @@ class ConnectionWatchdog @Inject constructor(
     @Volatile private var currentNetwork: Network? = null
     @Volatile private var lastNetworkChangeAt = 0L
     private var callbackRegistered = false
+    private var lastAnnouncementAt = Long.MIN_VALUE
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
@@ -120,6 +122,11 @@ class ConnectionWatchdog @Inject constructor(
             callbackRegistered = false
         }
         currentNetwork = null
+        this.scope = null
+        connect = null
+        dropConnections = null
+        heartbeat = null
+        inFlight.clear()
         Log.i(TAG, "Watchdog stopped")
     }
 
@@ -154,20 +161,26 @@ class ConnectionWatchdog @Inject constructor(
 
         // Re-announce ourselves so a PC that just booted (and so never heard our one-shot
         // startup broadcast) can discover us without the user touching anything.
-        networkDiscovery.broadcastDevice()
+        val now = SystemClock.elapsedRealtime()
+        if (lastAnnouncementAt == Long.MIN_VALUE || now - lastAnnouncementAt >= SLOW_INTERVAL_MS) {
+            lastAnnouncementAt = now
+            networkDiscovery.broadcastDevice()
+        }
 
         val connect = connect ?: return
         candidates.forEach { device ->
             if (!inFlight.add(device.deviceId)) return@forEach
-            Log.d(TAG, "[$reason] retrying ${device.deviceName} (${device.getAddressesToTry()})")
-            try {
-                connect(device)
-                val state = deviceManager.getPairedDevice(device.deviceId)?.connectionState
-                Log.d(TAG, "[$reason] ${device.deviceName} -> $state")
-            } catch (e: Exception) {
-                Log.e(TAG, "[$reason] retry of ${device.deviceName} failed", e)
-            } finally {
-                inFlight.remove(device.deviceId)
+            // A sleeping/offline PC must not hold up heartbeat checks for the other devices.
+            scope?.launch {
+                try {
+                    connect(device)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "[$reason] retry of ${device.deviceName} failed", e)
+                } finally {
+                    inFlight.remove(device.deviceId)
+                }
             }
         }
     }

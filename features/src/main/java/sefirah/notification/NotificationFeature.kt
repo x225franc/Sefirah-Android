@@ -43,6 +43,7 @@ class NotificationFeature @Inject constructor(
 ) : Feature(deviceManager), NotificationCallback {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val deduplicator = sefirah.domain.util.NotificationDeduplicator()
     private var isListenerConnected : Boolean = false
 
     private lateinit var listener: NotificationListenerService
@@ -50,7 +51,12 @@ class NotificationFeature @Inject constructor(
     override fun isPrefEnabled(prefs: DevicePreferences) = prefs.notificationSync
 
     override suspend fun onStart(deviceId: String) {
+        deduplicator.clearDevice(deviceId)
         sendActiveNotifications(deviceId)
+    }
+
+    override suspend fun onStop(deviceId: String) {
+        deduplicator.clearDevice(deviceId)
     }
 
     fun sendActiveNotifications(deviceId: String? = null) {
@@ -89,6 +95,7 @@ class NotificationFeature @Inject constructor(
     }
 
     override fun onNotificationRemoved(notification: StatusBarNotification) {
+        deduplicator.removed(notification.key, android.os.SystemClock.elapsedRealtime())
         // to remove the notification on the desktop
         val removeNotificationMessage = NotificationInfo(
             appPackage = notification.packageName,
@@ -304,8 +311,24 @@ class NotificationFeature @Inject constructor(
             )
 
             try {
-                Log.d("NotificationFeature", "${notificationInfo.appName} ${notificationInfo.title} ${notificationInfo.text}")
+                // Notification bodies can contain OTPs; never include them in logs.
+                // Ignore OEM changes to posting time and icon metadata. Retain text,
+                // conversation messages and actions so meaningful updates still pass.
+                val canonical = sefirah.domain.util.MessageSerializer.serialize(
+                    notificationInfo.copy(timestampMillis = 0, infoType = NotificationInfoType.New,
+                        appIcon = null, largeIcon = null),
+                ) ?: return@launch
+                val fingerprint = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(canonical.toByteArray(Charsets.UTF_8))
+                    .joinToString("") { "%02x".format(it) }
                 targetDeviceIds.forEach { deviceId ->
+                    if (notificationInfoType == NotificationInfoType.New &&
+                        !deduplicator.shouldSend(deviceId, notificationKey, fingerprint,
+                            android.os.SystemClock.elapsedRealtime())) return@forEach
+                    if (notificationInfoType == NotificationInfoType.Active) {
+                        deduplicator.shouldSend(deviceId, notificationKey, fingerprint,
+                            android.os.SystemClock.elapsedRealtime())
+                    }
                     networkManager.sendMessage(deviceId, notificationInfo)
                 }
             } catch (e: Exception) {

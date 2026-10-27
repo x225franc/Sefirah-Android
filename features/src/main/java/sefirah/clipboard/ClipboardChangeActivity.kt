@@ -18,6 +18,7 @@ import javax.inject.Inject
 @AndroidEntryPoint
 class ClipboardChangeActivity : FragmentActivity() {
     @Inject lateinit var clipboardFeature: ClipboardFeature
+    private var sending = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,10 +42,11 @@ class ClipboardChangeActivity : FragmentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (!hasFocus) return
+        if (!hasFocus || sending) return
+        sending = true
 
         lifecycleScope.launch {
-            clipboardFeature.sendPrimaryClipboard()
+            clipboardFeature.sendPrimaryClipboard(intent.getBooleanExtra(EXTRA_FORCE_SEND, false))
             finish()
         }
     }
@@ -55,14 +57,16 @@ class ClipboardChangeActivity : FragmentActivity() {
     }
 
     companion object {
+        private const val EXTRA_FORCE_SEND = "sefirah.clipboard.FORCE_SEND"
         @Volatile
         var isRunning: Boolean = false
             private set
 
-        fun launch(context: Context) {
+        fun launch(context: Context, forceSend: Boolean = false) {
             if (isRunning) return
             val intent = Intent(context, ClipboardChangeActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                putExtra(EXTRA_FORCE_SEND, forceSend)
             }
             context.startActivity(intent)
         }

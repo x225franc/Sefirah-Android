@@ -7,7 +7,7 @@ import sefirah.domain.model.SocketMessage
 interface NetworkManager {
     fun startService()
     fun stopService()
-    suspend fun connectPaired(device: PairedDevice)
+    suspend fun connectPaired(device: PairedDevice, userInitiated: Boolean = false)
     suspend fun connectTo(connectionDetails: ConnectionDetails)
     suspend fun disconnect(deviceId: String)
     fun broadcastMessage(message: SocketMessage)

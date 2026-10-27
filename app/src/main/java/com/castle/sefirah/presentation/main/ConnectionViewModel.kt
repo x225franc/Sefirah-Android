@@ -1,13 +1,16 @@
 package com.castle.sefirah.presentation.main
 
+import android.util.Log
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.komu.sekia.di.AppCoroutineScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -15,14 +18,15 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import sefirah.data.repository.AppUpdateChecker
 import sefirah.data.repository.ReleaseRepository
 import sefirah.domain.model.PairedDevice
+import sefirah.domain.model.ConnectionState
 import sefirah.domain.model.UpdateInfo
 import sefirah.domain.interfaces.DeviceManager
 import sefirah.domain.interfaces.NetworkManager
 import javax.inject.Inject
-import kotlin.time.Duration.Companion.milliseconds
 
 @HiltViewModel
 class ConnectionViewModel @Inject constructor(
@@ -50,54 +54,67 @@ class ConnectionViewModel @Inject constructor(
         deviceManager.selectedDeviceId
     ) { devices, selectedId ->
         devices.firstOrNull { it.deviceId == selectedId }
-    }.stateIn(viewModelScope, SharingStarted.Lazily, null)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     
     private val connectionJobs = mutableMapOf<String, Job>()
+    private val requestedConnections = mutableMapOf<String, Boolean>()
 
-    init {
-        appScope.launch {
-            selectedDevice.collect { device ->
-                // Clear refreshing when selected device's connection state changes to Connected or Disconnected
-                if (device != null && _isRefreshing.value && 
-                    (device.connectionState.isConnected || device.connectionState.isDisconnected)) {
-                    _isRefreshing.value = false
-                }
-            }
-        }
+    fun toggleConnection(device: PairedDevice) {
+        val current = pairedDevices.value.firstOrNull { it.deviceId == device.deviceId } ?: return
+        val connectingOrConnected = requestedConnections[device.deviceId]
+            ?: current.connectionState.isConnectedOrConnecting
+        requestConnection(current, connect = !connectingOrConnected)
     }
 
     fun toggleSync(syncRequest: Boolean) {
-        val device = selectedDevice.value ?: return
-        _isRefreshing.value = true
-        
-        val currentState = device.connectionState
-        when {
-            syncRequest && currentState.isDisconnected -> connect(device)
-            syncRequest && currentState.isConnected -> {
-                // Disconnect first, then reconnect
-                connectionJobs.remove(device.deviceId)?.cancel()
-                connectionJobs[device.deviceId] = appScope.launch(Dispatchers.IO) {
-                    networkManager.disconnect(device.deviceId)
-                    delay(200.milliseconds)
-                    networkManager.connectPaired(device)
-                }
-            }
-            !syncRequest && currentState.isConnectedOrConnecting -> {
-                // Cancel any ongoing connection attempt
-                connectionJobs.remove(device.deviceId)?.cancel()
-                appScope.launch(Dispatchers.IO) {
-                    networkManager.disconnect(device.deviceId)
-                }
-            }
-        }
+        val device = pairedDevices.value.firstOrNull {
+            it.deviceId == deviceManager.selectedDeviceId.value
+        } ?: return
+        // Pull-to-refresh deliberately replaces the selected connection; card buttons only toggle.
+        if (syncRequest && (connectionJobs[device.deviceId]?.isActive == true || device.connectionState.isConnecting)) return
+        requestConnection(device, connect = syncRequest, refresh = syncRequest)
     }
 
-    fun connect(device: PairedDevice) {
-        // Cancel any existing connection attempt
-        connectionJobs.remove(device.deviceId)?.cancel()
-        connectionJobs[device.deviceId] = appScope.launch(Dispatchers.IO) {
-            networkManager.connectPaired(device)
+    private fun requestConnection(device: PairedDevice, connect: Boolean, refresh: Boolean = false) {
+        val deviceId = device.deviceId
+        val previous = connectionJobs.remove(deviceId)
+        previous?.cancel()
+        requestedConnections[deviceId] = connect
+        val job = appScope.launch(Dispatchers.Main.immediate, start = CoroutineStart.LAZY) {
+            try {
+                // Finish cancellation before starting the opposite operation on the same device.
+                previous?.join()
+                if (refresh) _isRefreshing.value = true
+                withContext(Dispatchers.IO) {
+                    val current = deviceManager.getPairedDevice(deviceId) ?: return@withContext
+                    if (connect) {
+                        if (refresh && current.connectionState.isConnected) {
+                            networkManager.disconnect(deviceId)
+                        }
+                        networkManager.connectPaired(current, userInitiated = true)
+                    } else {
+                        networkManager.disconnect(deviceId)
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e("ConnectionViewModel", "Connection command failed for $deviceId", e)
+                deviceManager.getPairedDevice(deviceId)?.let { current ->
+                    deviceManager.addOrUpdatePairedDevice(
+                        current.copy(connectionState = ConnectionState.Error(e.message ?: "Connection failed"))
+                    )
+                }
+            } finally {
+                if (connectionJobs[deviceId] === currentCoroutineContext()[Job]) {
+                    connectionJobs.remove(deviceId)
+                    requestedConnections.remove(deviceId)
+                }
+                if (refresh) _isRefreshing.value = false
+            }
         }
+        connectionJobs[deviceId] = job
+        job.start()
     }
 
     fun selectDevice(device: PairedDevice) {

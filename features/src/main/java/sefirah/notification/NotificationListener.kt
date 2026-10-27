@@ -10,10 +10,12 @@ import javax.inject.Inject
 @AndroidEntryPoint
 class NotificationListener : NotificationListenerService() {
     @Inject lateinit var notificationCallback: NotificationCallback
+    @Inject lateinit var otpNotificationHandler: OtpNotificationHandler
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         sbn?.let { notification ->
             notificationCallback.onNotificationPosted(notification)
+            otpNotificationHandler.onNotificationPosted(notification)
         }
     }
 

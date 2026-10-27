@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="auto_copy_otp_preference">Copie automatique des OTP</string>
+    <string name="auto_copy_otp_subtitle">Détecte les codes de vérification dans les notifications et les copie automatiquement dans le presse-papiers.</string>
     <!-- App -->
     <string name="version">Version</string>
     <string name="share_deep_link">Share to Desktop</string>

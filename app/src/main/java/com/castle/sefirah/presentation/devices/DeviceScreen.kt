@@ -57,7 +57,7 @@ fun DeviceScreen(
             ) { device ->
                 DeviceCard(
                     device = device,
-                    onSyncAction = { connectionViewModel.connect(device) },
+                    onSyncAction = { connectionViewModel.toggleConnection(device) },
                     onClick = {
                         rootNavController.navigate(route = "device?deviceId=${device.deviceId}")
                     }

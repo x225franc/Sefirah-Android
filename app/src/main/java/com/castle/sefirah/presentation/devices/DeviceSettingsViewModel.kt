@@ -1,6 +1,7 @@
 package com.castle.sefirah.presentation.devices
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
@@ -14,6 +15,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import sefirah.FeatureManager
 import sefirah.clipboard.ClipboardAccessibilityService
 import sefirah.worker.ShizukuHelper
@@ -136,7 +138,13 @@ class DeviceSettingsViewModel @Inject constructor(
 
     fun removeDevice() {
         appScope.launch {
-            networkManager.disconnect(deviceId)
+            try {
+                networkManager.disconnect(deviceId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("DeviceSettings", "Could not disconnect removed device", e)
+            }
             deviceManager.removePairedDevice(deviceId)
         }
     }

@@ -58,6 +58,8 @@ class ClipboardFeature @Inject constructor(
     private var lastSentText: String? = null
     private var lastSentAt = 0L
     private var lastSentClipStamp = 0L
+    @Volatile private var localVerificationCode: String? = null
+    @Volatile private var localVerificationCodeAt = 0L
 
     init {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -84,6 +86,20 @@ class ClipboardFeature @Inject constructor(
         private set
 
     override fun isPrefEnabled(prefs: DevicePreferences) = prefs.clipboardSync
+
+    override suspend fun enable(deviceId: String) {
+        val alreadyEnabled = deviceId in enabledDevices
+        super.enable(deviceId)
+        // A replacement TCP session does not necessarily disable the old feature first.
+        // Refresh the worker even if the device remained in enabledDevices.
+        if (alreadyEnabled) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                preferencesRepository.readClipboardWorkerEnabled().first()) {
+                workerManager.startClipboardWatcher()
+            }
+            refreshDetectors()
+        }
+    }
 
     override suspend fun onStart(deviceId: String) {
         if (enabledDevices.size != 1) return
@@ -167,6 +183,7 @@ class ClipboardFeature @Inject constructor(
     }
 
     fun onWorkerClipboardText(text: String) {
+        if (isLocalVerificationCode(text)) return
         sendClipboard(ClipboardInfo("text/plain", text))
     }
 
@@ -203,6 +220,33 @@ class ClipboardFeature @Inject constructor(
         }
     }
 
+    /** Copy locally, then trigger the same focus activity used by external automation. */
+    fun copyVerificationCode(code: String): Boolean {
+        try {
+            suppressOutbound()
+            lastInboundSetAt = SystemClock.elapsedRealtime()
+            localVerificationCodeAt = lastInboundSetAt
+            localVerificationCode = code
+            scope.launch {
+                kotlinx.coroutines.delay(INBOUND_ECHO_WINDOW_MS)
+                if (localVerificationCode == code) localVerificationCode = null
+            }
+            val clip = ClipData.newPlainText("Verification code", code)
+            clipboardManager.setPrimaryClip(clip)
+            ClipboardChangeActivity.launch(context, forceSend = true)
+            return true
+        } catch (_: Exception) {
+            // Exception messages can contain clipboard data; never log them here.
+            return false
+        } finally {
+            suppressOutbound = false
+        }
+    }
+
+    private fun isLocalVerificationCode(text: String): Boolean =
+        localVerificationCode == text &&
+            SystemClock.elapsedRealtime() - localVerificationCodeAt < INBOUND_ECHO_WINDOW_MS
+
     fun setClipboardUri(uri: Uri) {
         try {
             suppressOutbound()
@@ -237,8 +281,8 @@ class ClipboardFeature @Inject constructor(
 
 
     @SuppressLint("Recycle")
-    suspend fun sendPrimaryClipboard(): Boolean {
-        if (suppressOutbound) return false
+    suspend fun sendPrimaryClipboard(forceSend: Boolean = false): Boolean {
+        if (suppressOutbound && !forceSend) return false
 
         val clip = try {
             clipboardManager.primaryClip
@@ -253,7 +297,7 @@ class ClipboardFeature @Inject constructor(
         // Several detectors (listener, logcat, accessibility) can fire for the same copy. Each
         // setPrimaryClip gets its own timestamp, so the same one means the same copy, however late.
         val stamp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) clip.description.timestamp else 0L
-        if (stamp != 0L && stamp == lastSentClipStamp) {
+        if (!forceSend && stamp != 0L && stamp == lastSentClipStamp) {
             Log.d(TAG, "Clip $stamp already sent, skipping")
             return true
         }
@@ -262,8 +306,9 @@ class ClipboardFeature @Inject constructor(
 
         val text = item.text?.toString()
         if (!text.isNullOrEmpty()) {
+            if (!forceSend && isLocalVerificationCode(text)) return true
             val now = SystemClock.elapsedRealtime()
-            if (stamp == 0L && text == lastSentText && now - lastSentAt < DUPLICATE_WINDOW_MS) return true
+            if (!forceSend && stamp == 0L && text == lastSentText && now - lastSentAt < DUPLICATE_WINDOW_MS) return true
             lastSentClipStamp = stamp
             lastSentText = text
             lastSentAt = now

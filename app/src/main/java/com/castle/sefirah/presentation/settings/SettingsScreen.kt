@@ -72,6 +72,7 @@ fun SettingsScreen(
     val showActionLabels by viewModel.showActionLabels.collectAsState()
     val clipboardWorkerEnabled by viewModel.clipboardWorkerEnabled.collectAsState()
     val logcatClipboardEnabled by viewModel.logcatClipboardEnabled.collectAsState()
+    val autoCopyOtpEnabled by viewModel.autoCopyOtpEnabled.collectAsState()
     val screenshotSyncEnabled by viewModel.screenshotSyncEnabled.collectAsState()
     var showReadLogsDialog by remember { mutableStateOf(false) }
 
@@ -202,6 +203,16 @@ fun SettingsScreen(
                 icon = ImageVector.vectorResource(R.drawable.ic_apps),
                 checked = showActionLabels,
                 onCheckedChanged = viewModel::saveShowActionLabels,
+            )
+        }
+
+        item {
+            SwitchPreferenceWidget(
+                title = stringResource(R.string.auto_copy_otp_preference),
+                subtitle = stringResource(R.string.auto_copy_otp_subtitle),
+                icon = ImageVector.vectorResource(R.drawable.ic_content_copy),
+                checked = autoCopyOtpEnabled,
+                onCheckedChanged = viewModel::saveAutoCopyOtpEnabled,
             )
         }
 

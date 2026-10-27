@@ -43,6 +43,8 @@ interface PreferencesRepository {
 
     suspend fun saveLogcatClipboardEnabled(enabled: Boolean)
     fun readLogcatClipboardEnabled(): Flow<Boolean>
+    suspend fun saveAutoCopyOtpEnabled(enabled: Boolean)
+    fun readAutoCopyOtpEnabled(): Flow<Boolean>
 
     suspend fun saveScreenshotSyncEnabled(enabled: Boolean)
     fun readScreenshotSyncEnabled(): Flow<Boolean>

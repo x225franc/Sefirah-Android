@@ -80,6 +80,14 @@ class SettingsViewModel @Inject constructor(
         .readLogcatClipboardEnabled()
         .stateIn(viewModelScope, SharingStarted.Lazily, false)
 
+    val autoCopyOtpEnabled: StateFlow<Boolean> = preferencesRepository
+        .readAutoCopyOtpEnabled()
+        .stateIn(viewModelScope, SharingStarted.Lazily, false)
+
+    fun saveAutoCopyOtpEnabled(enabled: Boolean) {
+        viewModelScope.launch { preferencesRepository.saveAutoCopyOtpEnabled(enabled) }
+    }
+
     val screenshotSyncEnabled: StateFlow<Boolean> = preferencesRepository
         .readScreenshotSyncEnabled()
         .stateIn(viewModelScope, SharingStarted.Lazily, false)

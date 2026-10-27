@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="auto_copy_otp_preference">Auto-copy verification codes</string>
+    <string name="auto_copy_otp_subtitle">Detects verification codes in notifications and automatically copies them to the clipboard.</string>
     <!-- App -->
     <string name="app_name" translatable="false">Sefirah</string>
     <string name="version">Version</string>

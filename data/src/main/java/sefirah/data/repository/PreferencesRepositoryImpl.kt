@@ -145,6 +145,14 @@ class PreferencesRepositoryImpl @Inject constructor(
         LOGCAT_CLIPBOARD_ENABLED.update(enabled)
     }
 
+    override suspend fun saveAutoCopyOtpEnabled(enabled: Boolean) {
+        AUTO_COPY_OTP_ENABLED.update(enabled)
+    }
+
+    override fun readAutoCopyOtpEnabled(): Flow<Boolean> = datastore.data.map {
+        it[AUTO_COPY_OTP_ENABLED] == true
+    }
+
     override fun readLogcatClipboardEnabled(): Flow<Boolean> {
         return datastore.data.map { preferences ->
             preferences[LOGCAT_CLIPBOARD_ENABLED] == true
@@ -312,6 +320,7 @@ class PreferencesRepositoryImpl @Inject constructor(
         val SHOW_ACTION_LABELS = booleanPreferencesKey("showActionLabels")
         val CLIPBOARD_WORKER_ENABLED = booleanPreferencesKey("clipboardWorkerEnabled")
         val LOGCAT_CLIPBOARD_ENABLED = booleanPreferencesKey("logcatClipboardEnabled")
+        val AUTO_COPY_OTP_ENABLED = booleanPreferencesKey("autoCopyOtpEnabled")
         val SCREENSHOT_SYNC_ENABLED = booleanPreferencesKey("screenshotSyncEnabled")
 
         fun permissionRequestedKey(permission: String) = booleanPreferencesKey("permission_requested_$permission")

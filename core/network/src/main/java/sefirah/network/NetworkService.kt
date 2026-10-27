@@ -11,6 +11,7 @@ import android.net.wifi.WifiManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import dagger.hilt.android.AndroidEntryPoint
@@ -22,12 +23,19 @@ import io.ktor.utils.io.readUTF8Line
 import io.ktor.utils.io.streams.asByteWriteChannel
 import io.ktor.utils.io.writeStringUtf8
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import sefirah.FeatureManager
@@ -62,6 +70,9 @@ import sefirah.domain.model.Ping
 import sefirah.domain.model.PendingDeviceApproval
 import sefirah.domain.model.SocketMessage
 import sefirah.domain.util.MessageSerializer
+import sefirah.domain.util.ConnectionRetryPolicy
+import sefirah.domain.util.HeartbeatAction
+import sefirah.domain.util.acceptIncomingConnection
 import sefirah.media.PlaybackFeature
 import sefirah.media.RemotePlaybackFeature
 import sefirah.network.extensions.cancelPairingVerificationNotification
@@ -148,6 +159,23 @@ class NetworkService : Service() {
     private var serverAcceptJob: Job? = null
 
     private val connections = java.util.concurrent.ConcurrentHashMap<String, DeviceConnection>()
+    private val connectionLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
+    private val outgoingConnections = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val attempts = java.util.concurrent.ConcurrentHashMap<String, ConnectionAttempt>()
+    private val retryPolicies = java.util.concurrent.ConcurrentHashMap<String, ConnectionRetryPolicy>()
+    @Volatile private var stopping = false
+
+    private class ConnectionAttempt {
+        var task: Deferred<Unit>? = null
+        @Volatile var socket: SSLSocket? = null
+        fun cancel() {
+            task?.cancel()
+            runCatching { socket?.close() }
+        }
+    }
+
+    private fun connectionLock(deviceId: String) = connectionLocks.getOrPut(deviceId) { Mutex() }
+    private fun retryPolicy(deviceId: String) = retryPolicies.getOrPut(deviceId) { ConnectionRetryPolicy() }
 
     private var tcpServerPort by Delegates.notNull<Int>()
 
@@ -166,7 +194,7 @@ class NetworkService : Service() {
                         // Check if device is already paired - if so, use connectPaired, otherwise connectTo
                         val pairedDevice = deviceManager.getPairedDevice(connectionDetails.deviceId)
                         if (pairedDevice != null) {
-                            connectPaired(pairedDevice)
+                            connectPaired(pairedDevice, userInitiated = true)
                         } else {
                             connectTo(connectionDetails)
                         }
@@ -175,7 +203,7 @@ class NetworkService : Service() {
                             .maxByOrNull { it.lastConnected ?: 0L }
                         
                         lastConnectedDevice?.let { device ->
-                            connectPaired(device)
+                            connectPaired(device, userInitiated = true)
                         }
                     }
                 }
@@ -248,8 +276,8 @@ class NetworkService : Service() {
 
         scope.launch {
             tcpServerPort = startTcpServer()
-            connectionWatchdog.start(scope, ::connectPaired, ::dropConnectedDevices, ::sendHeartbeatsAndPruneStale)
-            networkDiscovery.initialize(tcpServerPort)
+            launch(start = CoroutineStart.UNDISPATCHED) { networkDiscovery.initialize(tcpServerPort) }
+            connectionWatchdog.start(scope, { connectPaired(it) }, ::dropConnectedDevices, ::sendHeartbeatsAndPruneStale)
         }
 
         scope.launch {
@@ -306,7 +334,9 @@ class NetworkService : Service() {
     private suspend fun handleIncomingConnection(sslSocket: SSLSocket) {
         try {
             withContext(Dispatchers.IO) {
+                sslSocket.soTimeout = 10_000
                 sslSocket.startHandshake()
+                sslSocket.soTimeout = 0
             }
 
             val readChannel = sslSocket.inputStream.toByteReadChannel()
@@ -375,25 +405,40 @@ class NetworkService : Service() {
             return
         }
 
-        val connection = DeviceConnection(device.deviceId, sslSocket, readChannel, writeChannel)
-        setConnection(device.deviceId, connection)
+        connectionLock(device.deviceId).withLock {
+            val current = deviceManager.getPairedDevice(device.deviceId) ?: return@withLock sslSocket.close()
+            val existing = connections[device.deviceId]
+            if (stopping || (current.connectionState.isForcedDisconnect && !authMessage.userInitiated) ||
+                !acceptIncomingConnection(
+                    deviceManager.localDevice.deviceId, device.deviceId,
+                    attempts.containsKey(device.deviceId),
+                    existing?.let { outgoingConnections.contains(device.deviceId) },
+                )
+            ) {
+                sslSocket.close()
+                return@withLock
+            }
 
-        val updatedDevice = device.copy(
-            deviceName = authMessage.deviceName,
-            lastConnected = System.currentTimeMillis(),
-            addresses = if (device.addresses.none { it.address == address }) {
-                device.addresses + AddressEntry(address)
-            } else {
-                device.addresses
-            },
-            address = address,
-            connectionState = ConnectionState.Connected,
-        )
-
-        sendAuthMessage(writeChannel)
-
-        deviceManager.addOrUpdatePairedDevice(updatedDevice)
-        finalizeConnection(updatedDevice, false)
+            val connection = DeviceConnection(device.deviceId, sslSocket, readChannel, writeChannel)
+            if (!connection.sendMessageAndFlush(authenticationMessage())) {
+                connection.close()
+                return@withLock
+            }
+            attempts.remove(device.deviceId)?.cancel()
+            val updatedDevice = current.copy(
+                deviceName = authMessage.deviceName,
+                lastConnected = System.currentTimeMillis(),
+                addresses = if (current.addresses.none { it.address == address }) {
+                    current.addresses + AddressEntry(address)
+                } else current.addresses,
+                address = address,
+                connectionState = ConnectionState.Connected,
+            )
+            retryPolicy(device.deviceId).reset()
+            deviceManager.addOrUpdatePairedDevice(updatedDevice)
+            installConnection(device.deviceId, connection, outgoing = false)
+            finalizeConnection(updatedDevice, false)
+        }
     }
 
     private suspend fun authenticateNewDevice(
@@ -427,45 +472,96 @@ class NetworkService : Service() {
         deviceManager.addOrUpdateDiscoveredDevice(newDevice)
     }
 
-    suspend fun connectPaired(device: PairedDevice) {
-        deviceManager.addOrUpdatePairedDevice(device.copy(connectionState = ConnectionState.Connecting(device.deviceId)))
-
-        val port = device.port ?: PORT_RANGE.first
-
+    suspend fun connectPaired(device: PairedDevice, userInitiated: Boolean = false) {
+        val task = connectionLock(device.deviceId).withLock {
+            val current = deviceManager.getPairedDevice(device.deviceId) ?: return@withLock null
+            if (stopping || connections.containsKey(device.deviceId) || attempts.containsKey(device.deviceId)) return@withLock null
+            val policy = retryPolicy(device.deviceId)
+            if (!userInitiated && (current.connectionState.isForcedDisconnect || !policy.canRetry(SystemClock.elapsedRealtime()))) {
+                return@withLock null
+            }
+            if (userInitiated) policy.reset()
+            // Discovery may supply a new port/address, but never let its old state overwrite a user action.
+            val target = current.copy(
+                addresses = (device.addresses + current.addresses).distinctBy { it.address },
+                port = device.port ?: current.port,
+                connectionState = ConnectionState.Connecting(device.deviceId),
+            )
+            deviceManager.addOrUpdatePairedDevice(target)
+            val attempt = ConnectionAttempt()
+            attempts[device.deviceId] = attempt
+            scope.async(start = CoroutineStart.LAZY) {
+                connectPairedAttempt(target, attempt, userInitiated)
+            }.also { attempt.task = it }
+        }
         try {
+            task?.await()
+        } catch (e: CancellationException) {
+            // Cancelling a dial from the button must not cancel the watchdog or discovery collector.
+            if (task?.isCancelled != true) throw e
+        }
+    }
+
+    private suspend fun connectPairedAttempt(device: PairedDevice, attempt: ConnectionAttempt, userInitiated: Boolean) {
+        var connection: DeviceConnection? = null
+        var installed = false
+        try {
+            val port = device.port ?: PORT_RANGE.first
             val sslSocket = run {
-                for (ip in device.getAddressesToTry()) {
+                for (ip in device.getAddressesToTry().distinct()) {
                     socketFactory.tcpClientSocket(ip, port, device.certificate)?.let { return@run it }
                 }
                 null
-            } ?: run {
-                Log.e(TAG, "All connection attempts failed")
-                deviceManager.addOrUpdatePairedDevice(device.copy(connectionState = ConnectionState.Disconnected()))
-                return
-            }
-
+            } ?: throw java.io.IOException("All connection attempts failed")
+            attempt.socket = sslSocket
             val readChannel = sslSocket.inputStream.toByteReadChannel()
             val writeChannel = sslSocket.outputStream.asByteWriteChannel()
+            val candidate = DeviceConnection(device.deviceId, sslSocket, readChannel, writeChannel)
+            connection = candidate
+            check(candidate.sendMessageAndFlush(authenticationMessage(userInitiated))) { "Unable to send Authentication" }
+            val authentication = withTimeoutOrNull(10_000L) {
+                readChannel.readUTF8Line()?.let { MessageSerializer.deserialize(it) as? Authentication }
+            } ?: throw java.io.IOException("No Authentication response")
+            val certificate = SslHelper.verifySessionCertificate(sslSocket.session, authentication.publicKey)
+            check(authentication.deviceId == device.deviceId && certificate != null && certificate.encoded.contentEquals(device.certificate)) {
+                "Authentication identity does not match paired device"
+            }
 
-            sendAuthMessage(writeChannel)
-
-            val connection = DeviceConnection(device.deviceId, sslSocket, readChannel, writeChannel)
-            setConnection(device.deviceId, connection)
-
-            val remoteAddress = (sslSocket.remoteSocketAddress as? java.net.InetSocketAddress)?.address?.hostAddress ?: ""
-            val updatedDevice = device.copy(
-                lastConnected = System.currentTimeMillis(),
-                connectionState = ConnectionState.Connected,
-                port = port,
-                address = remoteAddress
-            )
-            deviceManager.addOrUpdatePairedDevice(updatedDevice)
-
-            Log.d(TAG, "Device ${updatedDevice.deviceId} connected")
-            finalizeConnection(updatedDevice, false)
+            connectionLock(device.deviceId).withLock {
+                if (stopping || attempts[device.deviceId] !== attempt) return@withLock
+                val current = deviceManager.getPairedDevice(device.deviceId) ?: return@withLock
+                if (current.connectionState.isForcedDisconnect) return@withLock
+                attempts.remove(device.deviceId)
+                val updatedDevice = current.copy(
+                    lastConnected = System.currentTimeMillis(),
+                    connectionState = ConnectionState.Connected,
+                    address = (sslSocket.remoteSocketAddress as? java.net.InetSocketAddress)?.address?.hostAddress,
+                )
+                retryPolicy(device.deviceId).reset()
+                deviceManager.addOrUpdatePairedDevice(updatedDevice)
+                installConnection(device.deviceId, candidate, outgoing = true)
+                installed = true
+                finalizeConnection(updatedDevice, false)
+            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Error during connection", e)
-            deviceManager.addOrUpdatePairedDevice(device.copy(connectionState = ConnectionState.Disconnected()))
+            Log.w(TAG, "Connection to ${device.deviceId} failed", e)
+        } finally {
+            if (!installed) {
+                connection?.close()
+                runCatching { attempt.socket?.close() }
+            }
+            withContext(NonCancellable) {
+                connectionLock(device.deviceId).withLock {
+                    if (attempts.remove(device.deviceId, attempt)) {
+                        retryPolicy(device.deviceId).failed(SystemClock.elapsedRealtime())
+                        deviceManager.getPairedDevice(device.deviceId)?.let { current ->
+                            deviceManager.addOrUpdatePairedDevice(current.copy(connectionState = ConnectionState.Disconnected(current.connectionState.isForcedDisconnect)))
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -474,8 +570,10 @@ class NetworkService : Service() {
         removeConnection(connectionDetails.deviceId)
         deviceManager.removeDiscoveredDevice(connectionDetails.deviceId)
 
+        var sslSocket: SSLSocket? = null
+        var installed = false
         try {
-            val sslSocket = run {
+            sslSocket = run {
                 connectionDetails.prefAddress?.let { prefAddress ->
                     socketFactory.tcpClientSocket(prefAddress, connectionDetails.port)?.let { return@run it }
                 }
@@ -487,9 +585,10 @@ class NetworkService : Service() {
                 Log.e(TAG, "All connection attempts failed")
                 return
             }
+            val socket = sslSocket
 
-            val readChannel = sslSocket.inputStream.toByteReadChannel()
-            val writeChannel = sslSocket.outputStream.asByteWriteChannel()
+            val readChannel = socket.inputStream.toByteReadChannel()
+            val writeChannel = socket.outputStream.asByteWriteChannel()
 
             sendAuthMessage(writeChannel)
 
@@ -505,19 +604,19 @@ class NetworkService : Service() {
             } ?: run {
                 Log.e(TAG, "Timeout or null response waiting for Authentication message")
                 readChannel.cancel()
-                sslSocket.close()
+                socket.close()
                 return
             }
 
-            val certificate = SslHelper.verifySessionCertificate(sslSocket.session, authResponse.publicKey)
+            val certificate = SslHelper.verifySessionCertificate(socket.session, authResponse.publicKey)
             if (certificate == null) {
                 Log.e(TAG, "No server certificate or public key mismatch with TLS peer; rejecting")
                 readChannel.cancel()
-                sslSocket.close()
+                socket.close()
                 return
             }
 
-            val address = (sslSocket.remoteSocketAddress as? java.net.InetSocketAddress)?.address?.hostAddress ?: ""
+            val address = (socket.remoteSocketAddress as? java.net.InetSocketAddress)?.address?.hostAddress ?: ""
 
             val verificationCode = SslHelper.getVerificationCode(certificate, SslHelper.certificate)
 
@@ -531,12 +630,19 @@ class NetworkService : Service() {
                 connectionDetails.port
             )
 
-            val connection = DeviceConnection(connectedDevice.deviceId, sslSocket, readChannel, writeChannel)
+            val connection = DeviceConnection(connectedDevice.deviceId, socket, readChannel, writeChannel)
             setConnection(connectedDevice.deviceId, connection)
+            installed = true
 
             deviceManager.addOrUpdateDiscoveredDevice(connectedDevice)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Error in connectTo", e)
+        } finally {
+            if (!installed) {
+                runCatching { sslSocket?.close() }
+            }
         }
     }
 
@@ -569,26 +675,35 @@ class NetworkService : Service() {
     }
 
     suspend fun disconnect(deviceId: String) {
-        deviceManager.getPairedDevice(deviceId)?.let {
-            if (it.connectionState.isConnected) {
-                sendMessage(it.deviceId, Disconnect)
-            }
-            disconnectDevice(it, true)
+        connectionLock(deviceId).withLock {
+            val device = deviceManager.getPairedDevice(deviceId) ?: return@withLock
+            disconnectDeviceLocked(device, forcedDisconnect = true, notifyPeer = true)
         }
     }
 
     suspend fun disconnectDevice(device: PairedDevice, forcedDisconnect: Boolean = false) {
-        Log.i(TAG, "Disconnected ${device.deviceName}")
-
-        deviceManager.addOrUpdatePairedDevice(device.copy(connectionState = ConnectionState.Disconnected(forcedDisconnect)))
-        featureManager.onDisconnect(device.deviceId)
-        removeConnection(device.deviceId)
+        connectionLock(device.deviceId).withLock {
+            val current = deviceManager.getPairedDevice(device.deviceId) ?: return@withLock
+            disconnectDeviceLocked(current, forcedDisconnect)
+        }
     }
 
-    private suspend fun disconnectDevice(device: DiscoveredDevice) {
+    private suspend fun disconnectDeviceLocked(device: PairedDevice, forcedDisconnect: Boolean = false, notifyPeer: Boolean = false) = withContext(NonCancellable) {
         Log.i(TAG, "Disconnected ${device.deviceName}")
-        deviceManager.removeDiscoveredDevice(device.deviceId)
-        removeConnection(device.deviceId)
+        val id = device.deviceId
+        attempts.remove(id)?.cancel()
+        val connection = connections.remove(id)
+        outgoingConnections.remove(id)
+        // Publish the user's choice before closing: EOF and discovery cannot undo it.
+        deviceManager.addOrUpdatePairedDevice(device.copy(
+            connectionState = ConnectionState.Disconnected(forcedDisconnect || device.connectionState.isForcedDisconnect)
+        ))
+        try {
+            if (notifyPeer) connection?.sendMessageAndFlush(Disconnect)
+        } finally {
+            connection?.close()
+            featureManager.onDisconnect(id)
+        }
     }
 
     suspend fun handlePairMessage(device: DiscoveredDevice, message: PairMessage) {
@@ -634,10 +749,8 @@ class NetworkService : Service() {
     }
 
     suspend fun handleDeviceInfo(deviceInfo: DeviceInfo, device: PairedDevice) {
-        val updatedDevice = device.copy(
-            deviceName = deviceInfo.deviceName,
-            avatar = deviceInfo.avatar
-        )
+        val current = deviceManager.getPairedDevice(device.deviceId) ?: return
+        val updatedDevice = current.copy(deviceName = deviceInfo.deviceName, avatar = deviceInfo.avatar)
         deviceManager.addOrUpdatePairedDevice(updatedDevice)
         Log.d(TAG, "DeviceInfo updated for ${device.deviceId}")
     }
@@ -656,14 +769,36 @@ class NetworkService : Service() {
     private fun startListeningForDevice(connection: DeviceConnection) {
         connection.startListening(
             getDevice = { deviceManager.getDevice(it) },
-            onMessage = { device, message -> scope.launch { handleMessage(device, message) } },
+            onMessage = { device, message ->
+                if (message is Disconnect || message is DeviceInfo || message is PairMessage) {
+                    connectionLock(connection.deviceId).withLock {
+                        if (connections[connection.deviceId] === connection) {
+                            val current = deviceManager.getDevice(connection.deviceId)
+                            if (message is Disconnect && current is PairedDevice) {
+                                disconnectDeviceLocked(current, forcedDisconnect = true)
+                            } else if (current != null) {
+                                handleMessage(current, message)
+                            }
+                        }
+                    }
+                } else {
+                    scope.launch {
+                        if (connections[connection.deviceId] === connection) handleMessage(device, message)
+                    }
+                }
+            },
             onClose = { closed ->
                 scope.launch {
                     val id = closed.deviceId
-                    if (connections[id] === closed) {
-                        when (val device = deviceManager.getDevice(id)) {
-                            is PairedDevice -> disconnectDevice(device)
-                            is DiscoveredDevice -> disconnectDevice(device)
+                    connectionLock(id).withLock {
+                        if (connections[id] === closed) {
+                            when (val device = deviceManager.getDevice(id)) {
+                                is PairedDevice -> disconnectDeviceLocked(device)
+                                else -> {
+                                    removeConnection(id)
+                                    deviceManager.removeDiscoveredDevice(id)
+                                }
+                            }
                         }
                     }
                 }
@@ -688,15 +823,19 @@ class NetworkService : Service() {
         featureManager.onConnect(device.deviceId)
     }
 
-    private suspend fun sendAuthMessage(writeChannel: ByteWriteChannel) {
+    private fun authenticationMessage(userInitiated: Boolean = false): Authentication {
         val localDevice = deviceManager.localDevice
-        val authenticationMessage = Authentication(
+        return Authentication(
             localDevice.deviceId,
             localDevice.deviceName,
             SslHelper.publicKeyString,
-            localDevice.model
+            localDevice.model,
+            userInitiated,
         )
-        val jsonMessage = MessageSerializer.serialize(authenticationMessage)
+    }
+
+    private suspend fun sendAuthMessage(writeChannel: ByteWriteChannel) {
+        val jsonMessage = MessageSerializer.serialize(authenticationMessage())
         writeChannel.writeStringUtf8("$jsonMessage\n")
         writeChannel.flush()
     }
@@ -715,8 +854,9 @@ class NetworkService : Service() {
 
     /** Closes every live connection without telling the peer (the network under it is gone). */
     private suspend fun dropConnectedDevices() {
+        retryPolicies.keys.forEach { id -> connectionLock(id).withLock { retryPolicy(id).reset() } }
         deviceManager.pairedDevices.value
-            .filter { it.connectionState.isConnected }
+            .filter { it.connectionState.isConnectedOrConnecting }
             .forEach { device ->
                 Log.i(TAG, "Dropping stale connection to ${device.deviceName}")
                 disconnectDevice(device)
@@ -724,39 +864,34 @@ class NetworkService : Service() {
     }
 
     /**
-     * Sends a [Ping] to every connected paired device and drops connections that haven't
-     * produced any traffic (including the desktop app's own heartbeat) in [STALE_THRESHOLD_MS],
-     * since a dead socket doesn't always surface a read/write error by itself.
+     * Desktop normally supplies the heartbeat. Probe only after prolonged silence and allow
+     * a full response window before dropping the socket, including after Android wakes up.
      */
     private suspend fun sendHeartbeatsAndPruneStale() {
-        val now = System.currentTimeMillis()
         deviceManager.pairedDevices.value
             .filter { it.connectionState.isConnected }
             .forEach { device ->
-                val connection = connections[device.deviceId] ?: run {
-                    disconnectDevice(device)
-                    return@forEach
-                }
-                val silentFor = now - connection.lastActivityMillis
-                if (silentFor > STALE_THRESHOLD_MS) {
-                    Log.w(TAG, "No traffic from ${device.deviceName} for ${silentFor / 1000}s, treating connection as dead")
-                    disconnectDevice(device)
-                } else {
-                    sendMessage(device.deviceId, Ping)
+                connectionLock(device.deviceId).withLock {
+                    val current = deviceManager.getPairedDevice(device.deviceId) ?: return@withLock
+                    if (!current.connectionState.isConnected) return@withLock
+                    val connection = connections[device.deviceId]
+                    when (connection?.heartbeatAction()) {
+                        null, HeartbeatAction.EXPIRED -> disconnectDeviceLocked(current)
+                        HeartbeatAction.PROBE -> connection.sendMessage(Ping)
+                        HeartbeatAction.NONE -> Unit
+                    }
                 }
             }
     }
 
     private val screenOnReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            networkDiscovery.broadcastDevice()
             connectionWatchdog.retryNow("screen on")
         }
     }
 
     private val wifiStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            networkDiscovery.broadcastDevice()
             connectionWatchdog.retryNow("wifi state changed")
         }
     }
@@ -805,14 +940,27 @@ class NetworkService : Service() {
     }
 
     // Connection management methods
-    private fun setConnection(deviceId: String, connection: DeviceConnection) {
-        removeConnection(deviceId)
-        connections[deviceId] = connection
+    private suspend fun setConnection(deviceId: String, connection: DeviceConnection) {
+        connectionLock(deviceId).withLock {
+            if (stopping || connections.containsKey(deviceId)) {
+                connection.close()
+                return@withLock
+            }
+            installConnection(deviceId, connection, outgoing = false)
+        }
+    }
+
+    /** Caller holds the device lock; publish replacement before closing the old reader. */
+    private fun installConnection(deviceId: String, connection: DeviceConnection, outgoing: Boolean) {
+        val previous = connections.put(deviceId, connection)
+        if (outgoing) outgoingConnections.add(deviceId) else outgoingConnections.remove(deviceId)
+        previous?.close()
         startListeningForDevice(connection)
     }
 
     private fun removeConnection(deviceId: String) {
         connections.remove(deviceId)?.close()
+        outgoingConnections.remove(deviceId)
     }
 
     fun sendMessage(deviceId: String, message: SocketMessage) {
@@ -822,6 +970,9 @@ class NetworkService : Service() {
     }
 
     override fun onDestroy() {
+        stopping = true
+        connectionWatchdog.stop()
+        attempts.values.forEach { it.cancel() }
         scope.cancel()
         serverAcceptJob?.cancel()
         try {
@@ -833,18 +984,18 @@ class NetworkService : Service() {
         // Clean disconnect all peers
         runBlocking {
             deviceManager.pairedDevices.value.forEach { device ->
-                if (device.connectionState.isConnected) {
-                    sendMessage(device.deviceId, Disconnect)
-                    disconnectDevice(device, true)
+                if (device.connectionState.isConnectedOrConnecting) {
+                    disconnectDevice(device)
                 }
             }
+            connections.keys.toList().forEach { removeConnection(it) }
         }
 
         unregisterReceiver(screenOnReceiver)
         unregisterReceiver(wifiStateReceiver)
         deviceControlHandler.stop()
         playSoundFeature.stop()
-        networkDiscovery.unregister()
+        networkDiscovery.shutdown()
         connectionWatchdog.stop()
 
         remotePlaybackFeature.release()
@@ -875,7 +1026,5 @@ class NetworkService : Service() {
         const val DEVICE_ID_EXTRA = "device_id"
         const val EXTRA_CONNECTION_DETAILS = "extra_connection_details"
 
-        /** Comfortably above both peers' heartbeat interval so a couple of missed beats don't false-positive. */
-        const val STALE_THRESHOLD_MS = 90_000L
     }
 }

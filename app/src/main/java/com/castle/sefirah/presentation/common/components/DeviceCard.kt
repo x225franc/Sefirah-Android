@@ -108,7 +108,7 @@ fun DeviceCard(
                 }
 
                 IconToggleButton(
-                    checked = device.connectionState.isConnected,
+                    checked = device.connectionState.isConnectedOrConnecting,
                     onCheckedChange = { onSyncAction() },
                     shapes = IconButtonDefaults.toggleableShapes(),
                     colors = IconButtonDefaults.filledIconToggleButtonColors(
@@ -119,8 +119,8 @@ fun DeviceCard(
                     ),
                 ) {
                     Icon(
-                        painter = if (device.connectionState.isConnected) painterResource(R.drawable.ic_sync_disabled) else painterResource(R.drawable.ic_sync),
-                        contentDescription = if (device.connectionState.isConnected) "Stop sync" else "Start sync",
+                        painter = if (device.connectionState.isConnectedOrConnecting) painterResource(R.drawable.ic_sync_disabled) else painterResource(R.drawable.ic_sync),
+                        contentDescription = if (device.connectionState.isConnectedOrConnecting) "Stop sync" else "Start sync",
                     )
                 }
             }

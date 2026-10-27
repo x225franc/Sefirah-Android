@@ -4,9 +4,11 @@ import android.graphics.drawable.Icon
 import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
+import android.util.Log
 import androidx.annotation.RequiresApi
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -28,6 +30,7 @@ class ConnectionToggleTileService : TileService() {
     
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var connectionStateJob: kotlinx.coroutines.Job? = null
+    private var commandJob: kotlinx.coroutines.Job? = null
     private var connectionState: ConnectionState = ConnectionState.Disconnected()
     private var lastConnectedDevice: PairedDevice? = null
     
@@ -39,6 +42,7 @@ class ConnectionToggleTileService : TileService() {
     override fun onStartListening() {
         super.onStartListening()
         // Start observing connection state for the last connected device
+        connectionStateJob?.cancel()
         connectionStateJob = serviceScope.launch {
             deviceManager.pairedDevices.collectLatest { devices ->
                 val device = devices.maxByOrNull { it.lastConnected ?: 0L }
@@ -57,23 +61,36 @@ class ConnectionToggleTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
-        serviceScope.launch(Dispatchers.IO) {
-           lastConnectedDevice?.let { device ->
-               when {
-                   connectionState.isConnected -> {
-                       networkManager.disconnect(device.deviceId)
-                   }
-                   connectionState.isDisconnected -> {
-                       networkManager.connectPaired(device)
-                   }
-               }
-           }
+        val device = lastConnectedDevice ?: return
+        val disconnect = connectionState.isConnectedOrConnecting || commandJob?.isActive == true
+        val previous = commandJob
+        previous?.cancel()
+        commandJob = serviceScope.launch {
+            try {
+                previous?.join()
+                withContext(Dispatchers.IO) {
+                    if (disconnect) {
+                        networkManager.disconnect(device.deviceId)
+                    } else {
+                        networkManager.connectPaired(device, userInitiated = true)
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Connection tile command failed", e)
+            }
         }
     }
 
     override fun onTileRemoved() {
         super.onTileRemoved()
+        connectionStateJob?.cancel()
+    }
+
+    override fun onDestroy() {
         serviceScope.cancel()
+        super.onDestroy()
     }
     
     private fun updateTile() {
@@ -81,11 +98,11 @@ class ConnectionToggleTileService : TileService() {
             val tile = qsTile ?: return@launch
 
             val (label, tileState, icon, subtitle) = when {
-                connectionState.isConnected -> {
+                connectionState.isConnectedOrConnecting -> {
                     TileData(
                         label = lastConnectedDevice?.deviceName ?: "",
                         tileState = Tile.STATE_ACTIVE,
-                        subtitle = getString(R.string.status_connected),
+                        subtitle = getString(if (connectionState.isConnecting) R.string.status_connecting else R.string.status_connected),
                         icon = Icon.createWithResource(this@ConnectionToggleTileService, R.drawable.ic_sync),
                     )
                 }

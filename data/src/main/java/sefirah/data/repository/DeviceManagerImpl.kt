@@ -6,6 +6,7 @@ import android.os.Build
 import android.provider.Settings
 import android.util.Log
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -95,7 +96,11 @@ class DeviceManagerImpl @Inject constructor(
                         val remoteDevice = deviceEntity.toDomain()
                         remoteDevice.copy(connectionState = ConnectionState.Disconnected())
                     }
-                    _pairedDevices.value = pairedList
+                    // A service/discovery callback can establish a session before the database
+                    // emits its initial list. Keep that live state instead of resetting it.
+                    val liveDevices = _pairedDevices.value.associateBy { it.deviceId }
+                    _pairedDevices.value = pairedList.map { liveDevices[it.deviceId] ?: it } +
+                        liveDevices.values.filter { live -> pairedList.none { it.deviceId == live.deviceId } }
                     
                     // Auto-select first device if none selected
                     if (_selectedDeviceId.value == null && pairedList.isNotEmpty()) {
@@ -149,8 +154,8 @@ class DeviceManagerImpl @Inject constructor(
 
     override suspend fun getDevice(deviceId: String): BaseRemoteDevice? {
         return devicesMutex.withLock {
-            _discoveredDevices.value[deviceId] ?: _pairedDevices.value.firstOrNull { it.deviceId == deviceId }
-        }
+            _pairedDevices.value.firstOrNull { it.deviceId == deviceId } ?: _discoveredDevices.value[deviceId]
+        } ?: getPairedDevice(deviceId)
     }
 
     override suspend fun getDiscoveredDevice(deviceId: String): DiscoveredDevice? {
@@ -168,6 +173,7 @@ class DeviceManagerImpl @Inject constructor(
                 dbDevice
             }
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             Log.e(TAG, "Error getting paired device", e)
             null
         }
@@ -191,23 +197,23 @@ class DeviceManagerImpl @Inject constructor(
 
     override suspend fun addOrUpdatePairedDevice(device: PairedDevice) {
         devicesMutex.withLock {
+            val previous = _pairedDevices.value.firstOrNull { it.deviceId == device.deviceId }
+            _pairedDevices.update { currentDevices ->
+                if (previous != null) {
+                    currentDevices.map { if (it.deviceId == device.deviceId) device else it }
+                } else currentDevices + device
+            }
+            if (previous?.connectionState != device.connectionState) {
+                _connectionEvents.tryEmit(DeviceConnectionEvent.OnConnectionStatusChanged)
+            }
             try {
-                appRepository.addDevice(device.toEntity())
-
-                _pairedDevices.update { currentDevices ->
-                    if (currentDevices.any { it.deviceId == device.deviceId }) {
-                        currentDevices.map { if (it.deviceId == device.deviceId) device else it }
-                    } else {
-                        currentDevices + device
-                    }
-                }
-
-                if (device.connectionState is ConnectionState.Connected ||
-                    device.connectionState is ConnectionState.Disconnected
-                ) {
-                    _connectionEvents.tryEmit(DeviceConnectionEvent.OnConnectionStatusChanged)
+                // Connection state is in memory. Do not write the database for every retry,
+                // nor let a persistence failure leave a closed transport displayed as connected.
+                if (previous?.toEntity() != device.toEntity()) {
+                    appRepository.addDevice(device.toEntity())
                 }
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 Log.e(TAG, "Error adding/updating device", e)
             }
         }
