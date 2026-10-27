@@ -408,10 +408,24 @@ class NetworkService : Service() {
 
         connectionLock(device.deviceId).withLock {
             val current = deviceManager.getPairedDevice(device.deviceId) ?: return@withLock sslSocket.close()
-            val existing = connections[device.deviceId]
+            if (manuallyDisconnected.contains(device.deviceId)) {
+                sslSocket.close()
+                return@withLock
+            }
+
+            var existing = connections[device.deviceId]
+            if (existing != null &&
+                SystemClock.elapsedRealtime() - existing.lastActivityMillis >= STALE_CONNECTION_THRESHOLD_MS
+            ) {
+                Log.i(TAG, "Replacing stale connection from ${device.deviceName} after incoming authentication")
+                connections.remove(device.deviceId, existing)
+                outgoingConnections.remove(device.deviceId)
+                attempts.remove(device.deviceId)?.cancel()
+                existing.close()
+                existing = null
+            }
+
             if (stopping ||
-                ((!authMessage.userInitiated || manuallyDisconnected.contains(device.deviceId)) &&
-                    (current.connectionState.isForcedDisconnect || manuallyDisconnected.contains(device.deviceId))) ||
                 !acceptIncomingConnection(
                     deviceManager.localDevice.deviceId, device.deviceId,
                     attempts.containsKey(device.deviceId),
@@ -1036,6 +1050,7 @@ class NetworkService : Service() {
 
         val PORT_RANGE = 5150..5169
         const val TAG = "NetworkService"
+        const val STALE_CONNECTION_THRESHOLD_MS = 30_000L
         const val DEVICE_ID_EXTRA = "device_id"
         const val EXTRA_CONNECTION_DETAILS = "extra_connection_details"
 
