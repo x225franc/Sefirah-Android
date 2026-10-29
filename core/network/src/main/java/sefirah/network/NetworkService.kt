@@ -1004,6 +1004,11 @@ class NetworkService : Service() {
         }
     }
 
+    suspend fun sendMessageAndFlush(deviceId: String, message: SocketMessage): Boolean {
+        val connection = connections[deviceId] ?: return false
+        return connection.sendMessageAndFlush(message, timeoutMillis = 5_000L) && connections[deviceId] === connection
+    }
+
     override fun onDestroy() {
         stopping = true
         connectionWatchdog.stop()

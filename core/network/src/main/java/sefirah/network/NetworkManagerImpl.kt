@@ -149,6 +149,9 @@ class NetworkManagerImpl @Inject constructor(
         networkService?.sendMessage(deviceId, message)
     }
 
+    override suspend fun sendMessageAndFlush(deviceId: String, message: SocketMessage): Boolean =
+        awaitService().sendMessageAndFlush(deviceId, message)
+
     override suspend fun approveDeviceConnection(deviceId: String) {
         networkService?.approveDeviceConnection(deviceId)
     }

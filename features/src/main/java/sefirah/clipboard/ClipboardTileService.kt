@@ -14,7 +14,8 @@ class ClipboardTileService : TileService() {
         super.onClick()
         TileServiceCompat.startActivityAndCollapse(this, PendingIntentActivityWrapper(
             this, 0, Intent(this, ClipboardChangeActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_CLEAR_TASK or Intent.FLAG_ACTIVITY_NEW_TASK
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                putExtra(ClipboardChangeActivity.EXTRA_FORCE_SEND, true)
             }, PendingIntent.FLAG_ONE_SHOT, true
         ))
     }

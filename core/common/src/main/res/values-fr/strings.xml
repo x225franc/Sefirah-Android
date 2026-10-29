@@ -161,4 +161,5 @@
     <string name="trust_all_networks">Trust all networks</string>
     <string name="device_settings">Device settings</string>
 
+    <string name="clipboard_send_failed">Envoi du presse-papiers impossible. Vérifie la connexion et le réglage de synchronisation.</string>
 </resources>

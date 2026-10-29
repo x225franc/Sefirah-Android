@@ -12,11 +12,18 @@ import android.util.Base64
 import android.util.Log
 import dagger.Lazy
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import sefirah.domain.util.ClipboardDeliveryTracker
 import sefirah.Feature
 import sefirah.common.util.createTempFile
 import sefirah.common.util.getFileProviderUri
@@ -55,8 +62,8 @@ class ClipboardFeature @Inject constructor(
     @Volatile private var listenerRegistered = false
     private var lastInboundSetAt = 0L
     private var lastLogcatTriggerAt = 0L
-    private var lastSentText: String? = null
-    private var lastSentAt = 0L
+    private val textDelivery = ClipboardDeliveryTracker()
+    private val textSendMutex = Mutex()
     private var lastSentClipStamp = 0L
     @Volatile private var localVerificationCode: String? = null
     @Volatile private var localVerificationCodeAt = 0L
@@ -110,6 +117,7 @@ class ClipboardFeature @Inject constructor(
     }
 
     override suspend fun onStop(deviceId: String) {
+        textDelivery.forget(deviceId)
         if (enabledDevices.isNotEmpty()) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             workerManager.stopClipboardWatcher()
@@ -270,6 +278,10 @@ class ClipboardFeature @Inject constructor(
     }
 
     fun sendClipboard(message: ClipboardInfo) {
+        if (message.clipboardType == "text/plain") {
+            scope.launch { sendTextClipboard(message, stamp = 0L, forceSend = false) }
+            return
+        }
         if (enabledDevices.isEmpty()) {
             return
         }
@@ -279,6 +291,44 @@ class ClipboardFeature @Inject constructor(
             networkManager.sendMessage(deviceId, message)
         }
     }
+
+    private suspend fun sendTextClipboard(message: ClipboardInfo, stamp: Long, forceSend: Boolean): Boolean = scope.async(Dispatchers.IO) {
+        // Delivery belongs to the feature, not the short-lived focus activity. Closing the quick
+        // settings panel must not cancel a socket write or tear down a healthy TCP session.
+        textSendMutex.withLock {
+            val targets = deviceManager.pairedDevices.value.filter { it.connectionState.isConnected && it.deviceId in enabledDevices }
+            if (targets.isEmpty()) {
+                Log.w(TAG, "Clipboard not sent: no connected destination with clipboard sync enabled")
+                return@withLock false
+            }
+            coroutineScope {
+                targets.map { device ->
+                    async(Dispatchers.IO) {
+                        val deviceId = device.deviceId
+                        if (!textDelivery.shouldSend(deviceId, stamp, message.content, SystemClock.elapsedRealtime(), forceSend, device.lastConnected)) {
+                            Log.d(TAG, "Clipboard already flushed to $deviceId; skipping automatic duplicate")
+                            return@async true
+                        }
+                        val sent = try {
+                            networkManager.sendMessageAndFlush(deviceId, message)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Exception) {
+                            Log.w(TAG, "Clipboard transport unavailable for $deviceId (${error.javaClass.simpleName})")
+                            false
+                        }
+                        if (sent) {
+                            textDelivery.sent(deviceId, stamp, message.content, SystemClock.elapsedRealtime(), device.lastConnected)
+                            Log.d(TAG, "Clipboard flushed to $deviceId (manual=$forceSend)")
+                        } else {
+                            Log.w(TAG, "Clipboard not flushed to $deviceId; eligible for another send")
+                        }
+                        sent
+                    }
+                }.awaitAll().any { it }
+            }
+        }
+    }.await()
 
 
     @SuppressLint("Recycle")
@@ -298,24 +348,15 @@ class ClipboardFeature @Inject constructor(
         // Several detectors (listener, logcat, accessibility) can fire for the same copy. Each
         // setPrimaryClip gets its own timestamp, so the same one means the same copy, however late.
         val stamp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) clip.description.timestamp else 0L
-        if (!forceSend && stamp != 0L && stamp == lastSentClipStamp) {
-            Log.d(TAG, "Clip $stamp already sent, skipping")
-            return true
-        }
-
         val item = clip.getItemAt(0)
 
         val text = item.text?.toString()
         if (!text.isNullOrEmpty()) {
             if (!forceSend && isLocalVerificationCode(text)) return true
-            val now = SystemClock.elapsedRealtime()
-            if (!forceSend && stamp == 0L && text == lastSentText && now - lastSentAt < DUPLICATE_WINDOW_MS) return true
-            lastSentClipStamp = stamp
-            lastSentText = text
-            lastSentAt = now
-            sendClipboard(ClipboardInfo("text/plain", text))
-            return true
+            return sendTextClipboard(ClipboardInfo("text/plain", text), stamp, forceSend)
         }
+
+        if (!forceSend && stamp != 0L && stamp == lastSentClipStamp) return true
 
         val uri = item.uri
         if (uri != null && clip.description.hasMimeType("image/*")) {
@@ -455,6 +496,5 @@ class ClipboardFeature @Inject constructor(
         private const val MAX_CLIPBOARD_IMAGE_BYTES = 32L * 1024 * 1024
         private const val INBOUND_ECHO_WINDOW_MS = 3_000L
         private const val LOGCAT_COOLDOWN_MS = 1_500L
-        private const val DUPLICATE_WINDOW_MS = 1_000L
     }
 }

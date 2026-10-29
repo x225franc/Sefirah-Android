@@ -241,4 +241,5 @@
     <string name="location_permission_dialog_message">Sefirah needs background location permission to know the WiFi network when the app is in the background. We only use it to get the WiFi name—nothing else from the location permission is used.</string>
     <string name="media_session_preference">Desktop media sessions</string>
 
+    <string name="clipboard_send_failed">Clipboard could not be sent. Check the connection and clipboard sync setting.</string>
 </resources>

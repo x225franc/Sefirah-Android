@@ -82,10 +82,11 @@ private fun NetworkService.buildConnectionNotification(deviceName: String?, devi
 
     // Clipboard copy action intent
     val clipboardIntent = Intent(this, ClipboardChangeActivity::class.java).apply {
+        putExtra(ClipboardChangeActivity.EXTRA_FORCE_SEND, true)
         action = Intent.ACTION_SEND
         type = "text/plain"
     }
-    val clipboardPendingIntent: PendingIntent = PendingIntent.getActivity(this, 0, clipboardIntent, PendingIntent.FLAG_IMMUTABLE)
+    val clipboardPendingIntent: PendingIntent = PendingIntent.getActivity(this, 0, clipboardIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
 
     val contentText =  if (deviceName.isNullOrEmpty()) {
         getString(R.string.notification_status_disconnected)
