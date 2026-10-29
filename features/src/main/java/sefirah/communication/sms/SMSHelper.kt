@@ -186,7 +186,12 @@ object SMSHelper {
      * @param uri Uri indicating the messages database to check
      * @param context android.content.Context running the request.
      */
-    private fun getSubscriptionIdSupport(uri: Uri, context: Context): Boolean {
+    private val subscriptionIdSupport = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    private fun getSubscriptionIdSupport(uri: Uri, context: Context): Boolean =
+        subscriptionIdSupport.getOrPut(uri.toString()) { querySubscriptionIdSupport(uri, context) }
+
+    private fun querySubscriptionIdSupport(uri: Uri, context: Context): Boolean {
         // Some (Xiaomi) devices running >= Android Lollipop (SDK 22+) don't support
         // `Telephony.Sms.SUBSCRIPTION_ID`, so additional check is needed.
         // It may be possible to use "sim_id" instead of "sub_id" on these devices
@@ -194,7 +199,7 @@ object SMSHelper {
         try {
             context.contentResolver.query(
                 uri, arrayOf(Telephony.Sms.SUBSCRIPTION_ID),
-                null,
+                "1 = 0", // Inspect the schema without scanning the entire SMS/MMS database.
                 null,
                 null
             ).use { availableColumnsCursor ->

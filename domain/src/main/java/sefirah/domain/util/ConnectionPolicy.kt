@@ -19,7 +19,7 @@ class ConnectionRetryPolicy {
     }
 }
 
-/** Both peers choose the same socket when they dial each other simultaneously. */
+/** Both peers choose the same socket when their outgoing TLS connections are ready. */
 fun acceptIncomingConnection(
     localId: String,
     remoteId: String,

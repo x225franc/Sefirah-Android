@@ -11,7 +11,8 @@ abstract class Feature(
 ) {
 
     /** Device IDs for which this feature is currently active. */
-    protected val enabledDevices = mutableSetOf<String>()
+    // Binder callbacks and background sends can iterate while a session connects/disconnects.
+    protected val enabledDevices = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /** Read-only view of [enabledDevices] for subclasses and callers that send to actives. */
     val activeDeviceIds: Set<String>

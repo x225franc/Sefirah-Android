@@ -213,6 +213,7 @@ class ClipboardFeature @Inject constructor(
             suppressOutbound()
             lastInboundSetAt = SystemClock.elapsedRealtime()
             clipboardManager.setPrimaryClip(clip)
+            Log.d(TAG, "Remote clipboard applied (${clipboard.clipboardType})")
         } catch (ex: Exception) {
             Log.e(TAG, "Exception handling clipboard", ex)
         } finally {

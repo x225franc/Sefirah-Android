@@ -3,10 +3,16 @@ package sefirah.communication.sms
 import android.content.Context
 import android.database.ContentObserver
 import android.os.Handler
+import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.yield
+import sefirah.domain.util.DeviceBackgroundWork
 import sefirah.common.util.smsPermissionGranted
 import sefirah.communication.sms.SMSHelper.MessageLooper.Companion.getLooper
 import sefirah.communication.sms.SMSHelper.getConversations
@@ -37,6 +43,7 @@ class SmsFeature @Inject constructor(
     private val networkManager: NetworkManager,
 ) : BoundFeature(deviceManager) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val initialSync = DeviceBackgroundWork(scope)
     private var messageObserver: ContentObserver = MessageContentObserver(Handler(getLooper()!!))
 
     // Cache of existing thread IDs
@@ -55,10 +62,28 @@ class SmsFeature @Inject constructor(
     }
 
     override suspend fun onStart(deviceId: String) {
-        sendAllConversations(deviceId)
+        // A content-provider query can take minutes after resume. Never hold the feature/session
+        // lifecycle lock while enumerating SMS: DeviceInfo would block the socket reader behind it.
+        initialSync.start(deviceId) {
+            try {
+                val startedAt = SystemClock.elapsedRealtime()
+                Log.d(TAG, "Initial conversation sync started for $deviceId")
+                sendAllConversations(deviceId)
+                Log.d(TAG, "Initial conversation sync finished in ${SystemClock.elapsedRealtime() - startedAt}ms for $deviceId")
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Log.e(TAG, "Initial conversation sync failed for $deviceId", error)
+            }
+        }
+    }
+
+    override suspend fun onStop(deviceId: String) {
+        initialSync.cancel(deviceId)
     }
 
     fun stop() {
+        initialSync.cancelAll()
         stopContentObserver()
     }
 
@@ -169,16 +194,19 @@ class SmsFeature @Inject constructor(
     /**
      * Send all conversations (one message per thread)
      */
-    fun sendAllConversations(deviceId: String?) {
-        val targetDeviceIds = deviceId?.let { setOf(it) } ?: enabledDevices
-        if (targetDeviceIds.isEmpty()) return
+    private suspend fun sendAllConversations(deviceId: String) {
+        currentCoroutineContext().ensureActive()
+        val targetDeviceIds = setOf(deviceId)
 
         val conversations = getConversations(this.context)
+        currentCoroutineContext().ensureActive()
         // Build a set of thread IDs while we process the conversations
         val currentThreadIds = mutableSetOf<Long>()
         
         // For each conversation (already one message per thread from getConversations)
         conversations.forEach { conversationInfo ->
+            currentCoroutineContext().ensureActive()
+            if (!deviceManager.pairedDevices.value.any { it.deviceId == deviceId && it.connectionState.isConnected }) return
             val threadId = conversationInfo.message.threadID.threadID
             currentThreadIds.add(threadId)
             
@@ -192,6 +220,7 @@ class SmsFeature @Inject constructor(
                 messages = listOf(textMessage)
             )
             sendToDesktop(conversation, targetDeviceIds)
+            yield()
         }
         
         // Store the current thread IDs for later comparison

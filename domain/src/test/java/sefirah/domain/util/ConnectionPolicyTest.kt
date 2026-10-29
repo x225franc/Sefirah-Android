@@ -76,6 +76,14 @@ class ConnectionPolicyTest {
         assertTrue(acceptIncomingConnection("b", "a", false, true))
     }
 
+    @Test fun scanningObsoleteAddressesCannotBlockAnAuthenticatedIncomingConnection() {
+        // No outgoing TLS socket yet: accept either peer, even when our ID would win a collision.
+        assertTrue(acceptIncomingConnection("a", "z", outgoingAttempt = false, existingOutgoing = null))
+        assertTrue(acceptIncomingConnection("z", "a", outgoingAttempt = false, existingOutgoing = null))
+        // Once TLS is ready on both sockets, retain deterministic collision arbitration.
+        assertFalse(acceptIncomingConnection("a", "z", outgoingAttempt = true, existingOutgoing = null))
+    }
+
     @Test fun ordinaryIncomingWorksFromEitherPeerButDuplicatesAreRejected() {
         assertTrue(acceptIncomingConnection("a", "b", false, null))
         assertTrue(acceptIncomingConnection("b", "a", false, null))

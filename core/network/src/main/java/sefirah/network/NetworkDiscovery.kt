@@ -286,14 +286,11 @@ class NetworkDiscovery @Inject constructor(
                                     .map { AddressEntry(it) }
                                 val mergedAddresses = device.addresses + newEntries
                                 
-                                val updatedDevice = if (newEntries.isNotEmpty() || device.port != port) {
-                                    device.copy(
-                                        addresses = mergedAddresses,
-                                        port = port
-                                    )
-                                } else {
-                                    device
-                                }
+                                val updatedDevice = device.copy(
+                                    addresses = mergedAddresses,
+                                    address = device.address?.takeIf { it in addresses } ?: addresses.first(),
+                                    port = port,
+                                )
                                 networkManager.connectPaired(updatedDevice)
                             }
                             is DiscoveredDevice -> return@forEach
@@ -374,7 +371,7 @@ class NetworkDiscovery @Inject constructor(
                         val updatedAddresses = if (device.addresses.none { it.address == senderIp }) {
                             device.addresses + AddressEntry(senderIp)
                         } else device.addresses
-                         val updatedDevice = device.copy(addresses = updatedAddresses, port = udpBroadcast.port)
+                         val updatedDevice = device.copy(addresses = updatedAddresses, address = senderIp, port = udpBroadcast.port)
                          networkManager.connectPaired(updatedDevice)
                     }
                     null -> {

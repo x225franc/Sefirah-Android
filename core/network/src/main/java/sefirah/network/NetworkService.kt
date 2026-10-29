@@ -427,7 +427,9 @@ class NetworkService : Service() {
             if (stopping ||
                 (!replaceSilent && !acceptIncomingConnection(
                     deviceManager.localDevice.deviceId, device.deviceId,
-                    attempts.containsKey(device.deviceId),
+                    // A dial still scanning old addresses must not reject an authenticated peer.
+                    // Arbitrate simultaneous opens only once our outgoing TLS socket is ready.
+                    attempts[device.deviceId]?.socket != null,
                     existing?.let { outgoingConnections.contains(device.deviceId) },
                 ))
             ) {
@@ -515,6 +517,7 @@ class NetworkService : Service() {
             // Discovery may supply a new port/address, but never let its old state overwrite a user action.
             val target = current.copy(
                 addresses = (device.addresses + current.addresses).distinctBy { it.address },
+                address = device.address ?: current.address,
                 port = device.port ?: current.port,
                 connectionState = ConnectionState.Connecting(device.deviceId),
             )

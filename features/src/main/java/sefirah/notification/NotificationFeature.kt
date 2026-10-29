@@ -16,6 +16,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.os.bundleOf
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -42,9 +43,12 @@ class NotificationFeature @Inject constructor(
     private val networkManager: NetworkManager,
 ) : Feature(deviceManager), NotificationCallback {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, error ->
+        // A stale listener binder or malformed notification must not crash the whole network service.
+        Log.e(TAG, "Notification synchronization failed", error)
+    })
     private val deduplicator = sefirah.domain.util.NotificationDeduplicator()
-    private var isListenerConnected : Boolean = false
+    @Volatile private var isListenerConnected : Boolean = false
 
     private lateinit var listener: NotificationListenerService
 
@@ -60,18 +64,25 @@ class NotificationFeature @Inject constructor(
     }
 
     fun sendActiveNotifications(deviceId: String? = null) {
-        val targetDeviceIds = deviceId?.let { setOf(it) } ?: enabledDevices
+        val targetDeviceIds = deviceId?.let { setOf(it) } ?: enabledDevices.toSet()
 
-        if (!isListenerConnected && targetDeviceIds.isEmpty()) {
+        if (!isListenerConnected || targetDeviceIds.isEmpty()) {
             return
         } else {
             scope.launch {
-                if (!::listener.isInitialized) {
+                if (!isListenerConnected || !::listener.isInitialized) {
                     Log.w(TAG, "Notification listener not connected")
                     return@launch
                 }
 
-                val activeNotifications = listener.activeNotifications
+                val activeNotifications = try {
+                    listener.activeNotifications
+                } catch (_: SecurityException) {
+                    // Android can revoke the binder between the flag check and the IPC call.
+                    // onListenerConnected will send the snapshot when the service binds again.
+                    Log.w(TAG, "Notification listener temporarily unavailable")
+                    return@launch
+                }
                 if (!activeNotifications.isNullOrEmpty()) {
                     activeNotifications.forEach { sbn ->
                         sendNotification(sbn, NotificationInfoType.Active, targetDeviceIds)
@@ -109,8 +120,8 @@ class NotificationFeature @Inject constructor(
     }
 
     override fun onListenerConnected(service: NotificationListenerService) {
-        isListenerConnected = true
         listener = service
+        isListenerConnected = true
         sendActiveNotifications()
     }
 

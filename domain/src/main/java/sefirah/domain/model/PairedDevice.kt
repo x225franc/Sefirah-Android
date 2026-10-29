@@ -15,11 +15,16 @@ data class PairedDevice(
     /** Returns enabled addresses sorted by priority, or all addresses if none enabled */
     fun getAddressesToTry(): List<String> {
         val enabled = addresses.filter { it.isEnabled }.sortedBy { it.priority }
-        return if (enabled.isNotEmpty()) {
+        val candidates = if (enabled.isNotEmpty()) {
             enabled.map { it.address }
         } else {
             addresses.sortedBy { it.priority }.map { it.address }
-        }
+        }.distinct()
+        // The current LAN address often comes after years of obsolete Wi-Fi/VPN adapters.
+        // Prefer the address that last worked, while respecting explicitly disabled entries.
+        return if (address != null && address in candidates) {
+            listOf(address) + candidates.filterNot { it == address }
+        } else candidates
     }
 
     override fun equals(other: Any?): Boolean = when {
