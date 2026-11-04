@@ -273,7 +273,7 @@ class NetworkDiscovery @Inject constructor(
                                 .filter { !it.contains(":") }
                         }
 
-                        if (port == null || addresses.isEmpty()) return@forEach
+                        if (port == null || port !in 1..65535 || addresses.isEmpty()) return@forEach
 
                         when (val device = deviceManager.getDevice(deviceId)) {
                             is PairedDevice -> {
@@ -355,6 +355,7 @@ class NetworkDiscovery @Inject constructor(
                 } ?: continue
 
                 if (udpBroadcast.deviceId == deviceManager.localDevice.deviceId) continue
+                if (udpBroadcast.port !in 1..65535) continue
                 Log.d(TAG, "Received UDP broadcast from ${udpBroadcast.deviceName}")
 
                 val now = SystemClock.elapsedRealtime()

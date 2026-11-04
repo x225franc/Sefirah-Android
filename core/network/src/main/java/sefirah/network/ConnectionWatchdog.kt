@@ -4,11 +4,14 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.net.LinkProperties
 import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -16,6 +19,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import sefirah.domain.interfaces.DeviceManager
 import sefirah.domain.model.PairedDevice
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -57,6 +61,9 @@ class ConnectionWatchdog @Inject constructor(
     @Volatile private var currentNetwork: Network? = null
     @Volatile private var lastNetworkChangeAt = 0L
     private var callbackRegistered = false
+    private var lanCallbackRegistered = false
+    private val networkChangePending = AtomicBoolean(false)
+    private val lanAddresses = ConcurrentHashMap<Network, String>()
     private var lastAnnouncementAt = Long.MIN_VALUE
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -65,14 +72,28 @@ class ConnectionWatchdog @Inject constructor(
             currentNetwork = network
             if (previous == network) return
             Log.i(TAG, "Default network available: $network (previous: $previous)")
-            onNetworkChanged("network available", dropExisting = previous != null)
+            onNetworkChanged("default network available")
         }
 
         override fun onLost(network: Network) {
             if (currentNetwork != network) return
             Log.i(TAG, "Default network lost: $network")
             currentNetwork = null
-            scope?.launch { dropConnections?.invoke() }
+            onNetworkChanged("default network lost")
+        }
+    }
+
+    // The default network may remain a VPN while Wi-Fi disappears or comes back.
+    private val lanCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) = onNetworkChanged("LAN available")
+        override fun onLost(network: Network) {
+            lanAddresses.remove(network)
+            onNetworkChanged("LAN lost")
+        }
+        override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) {
+            val addresses = properties.linkAddresses.map { it.toString() }.sorted().joinToString()
+            val previous = lanAddresses.put(network, addresses)
+            if (previous != null && previous != addresses) onNetworkChanged("LAN addresses changed")
         }
     }
 
@@ -94,6 +115,18 @@ class ConnectionWatchdog @Inject constructor(
         } catch (e: Exception) {
             Log.e(TAG, "Failed to register default network callback", e)
         }
+        try {
+            connectivityManager.registerNetworkCallback(
+                NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+                    .build(), lanCallback,
+            )
+            lanCallbackRegistered = true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register LAN callback", e)
+        }
 
         loopJob = scope.launch {
             Log.i(TAG, "Watchdog started")
@@ -104,8 +137,24 @@ class ConnectionWatchdog @Inject constructor(
                     SLOW_INTERVAL_MS
                 }
                 val reason = withTimeoutOrNull(interval) { wakeUp.receive() } ?: "periodic"
-                heartbeat?.invoke()
-                retryPairedDevices(reason)
+                try {
+                    if (networkChangePending.get()) {
+                        // VPN toggles emit several callbacks. One serialized reset prevents an old
+                        // onLost coroutine from closing the session established by a later event.
+                        delay(500L)
+                        if (networkChangePending.getAndSet(false)) {
+                            dropConnections?.invoke() // Also clears obsolete connection backoff.
+                            networkDiscovery.restartDiscovery(reason)
+                            lastAnnouncementAt = Long.MIN_VALUE
+                        }
+                    }
+                    heartbeat?.invoke()
+                    retryPairedDevices(reason)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "Watchdog recovery failed; will retry on the next pass", e)
+                }
             }
         }
     }
@@ -122,6 +171,12 @@ class ConnectionWatchdog @Inject constructor(
             callbackRegistered = false
         }
         currentNetwork = null
+        if (lanCallbackRegistered) {
+            runCatching { connectivityManager.unregisterNetworkCallback(lanCallback) }
+            lanCallbackRegistered = false
+        }
+        lanAddresses.clear()
+        networkChangePending.set(false)
         this.scope = null
         connect = null
         dropConnections = null
@@ -135,13 +190,10 @@ class ConnectionWatchdog @Inject constructor(
         wakeUp.trySend(reason)
     }
 
-    private fun onNetworkChanged(reason: String, dropExisting: Boolean) {
+    private fun onNetworkChanged(reason: String) {
         lastNetworkChangeAt = SystemClock.elapsedRealtime()
-        scope?.launch {
-            if (dropExisting) dropConnections?.invoke()
-            networkDiscovery.restartDiscovery(reason)
-            retryNow(reason)
-        }
+        networkChangePending.set(true)
+        retryNow(reason)
     }
 
     private suspend fun retryPairedDevices(reason: String) {
@@ -187,6 +239,11 @@ class ConnectionWatchdog @Inject constructor(
 
     /** True unless the only network is cellular (a LAN device can't be reached there). */
     private fun hasLanCapableNetwork(): Boolean {
+        if (connectivityManager.allNetworks.any { candidate ->
+                val capabilities = connectivityManager.getNetworkCapabilities(candidate)
+                capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true ||
+                    capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true
+            }) return true
         val network = connectivityManager.activeNetwork ?: return false
         val caps = connectivityManager.getNetworkCapabilities(network) ?: return false
         return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||

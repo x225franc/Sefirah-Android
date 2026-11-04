@@ -601,6 +601,10 @@ class NetworkService : Service() {
 
 
     suspend fun connectTo(connectionDetails: ConnectionDetails) {
+        if (connectionDetails.port !in 1..65535) {
+            Log.w(TAG, "Ignoring discovery with an invalid TCP port")
+            return
+        }
         removeConnection(connectionDetails.deviceId)
         deviceManager.removeDiscoveredDevice(connectionDetails.deviceId)
 

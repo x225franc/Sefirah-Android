@@ -17,7 +17,7 @@ import javax.net.ssl.SSLSocket
 import java.net.InetSocketAddress as JavaInetSocketAddress
 
 @Singleton
-class SocketFactoryImpl @Inject constructor() : SocketFactory {
+class SocketFactoryImpl @Inject constructor(private val lanNetworks: LanNetworkSelector) : SocketFactory {
     val selectorManager = SelectorManager(Dispatchers.IO)
 
     override suspend fun tcpClientSocket(address: String, port: Int, certificate: ByteArray?): SSLSocket? {
@@ -28,6 +28,10 @@ class SocketFactoryImpl @Inject constructor() : SocketFactory {
             withContext(Dispatchers.IO) {
                 (sslContext.socketFactory.createSocket() as SSLSocket).apply {
                     socket = this
+                    lanNetworks.forPeer(address)?.let { network ->
+                        network.bindSocket(this)
+                        Log.d(TAG, "Using local network $network for $address:$port")
+                    }
                     connect(JavaInetSocketAddress(address, port), 3000)
                     soTimeout = 3000
                     startHandshake()
