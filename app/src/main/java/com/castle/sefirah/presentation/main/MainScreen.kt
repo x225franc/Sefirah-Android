@@ -56,7 +56,7 @@ fun MainScreen(
     val hasCheckedForUpdate = remember { viewModel.hasCheckedForUpdate }
 
     LaunchedEffect(Unit) {
-        if (!hasCheckedForUpdate.value) {
+        if (com.castle.sefirah.BuildConfig.CHECK_FOR_UPDATES && !hasCheckedForUpdate.value) {
             Log.d("MainScreen", "Checking for update")
             val result = viewModel.checkForUpdate()
             if (result is ReleaseRepository.Result.NewUpdate) {

@@ -316,6 +316,7 @@ class NetworkService : Service() {
                             tcpServerSocket?.accept() as? SSLSocket
                         } ?: break
 
+                        sslSocket.keepAlive = true
                         Log.d(TAG, "Accepted incoming connection from ${sslSocket.remoteSocketAddress}")
                         launch { handleIncomingConnection(sslSocket) }
                     } catch (e: Exception) {
@@ -883,8 +884,11 @@ class NetworkService : Service() {
         try {
             if (!isContactsPermissionGranted(this)) return
 
-            ContactsHelper().getAllContacts(this).forEach { contact ->
-                sendMessage(device.deviceId, contact)
+            for (contact in ContactsHelper().getAllContacts(this)) {
+                if (!sendMessage(device.deviceId, contact)) {
+                    Log.d(TAG, "Stopping contact sync for ${device.deviceId}; connection gone")
+                    return
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error sending contacts", e)
@@ -997,15 +1001,13 @@ class NetworkService : Service() {
         startListeningForDevice(connection)
     }
 
-    private fun removeConnection(deviceId: String) {
+    private suspend fun removeConnection(deviceId: String) {
         connections.remove(deviceId)?.close()
         outgoingConnections.remove(deviceId)
     }
 
-    fun sendMessage(deviceId: String, message: SocketMessage) {
-        connections[deviceId]?.sendMessage(message) ?: run {
-            Log.w(TAG, "Cannot send message to $deviceId: no connection found")
-        }
+    fun sendMessage(deviceId: String, message: SocketMessage): Boolean {
+        return connections[deviceId]?.sendMessage(message) ?: false
     }
 
     suspend fun sendMessageAndFlush(deviceId: String, message: SocketMessage): Boolean {

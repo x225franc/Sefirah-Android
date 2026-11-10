@@ -28,6 +28,7 @@ class SocketFactoryImpl @Inject constructor(private val lanNetworks: LanNetworkS
             withContext(Dispatchers.IO) {
                 (sslContext.socketFactory.createSocket() as SSLSocket).apply {
                     socket = this
+                    keepAlive = true
                     lanNetworks.forPeer(address)?.let { network ->
                         network.bindSocket(this)
                         Log.d(TAG, "Using local network $network for $address:$port")

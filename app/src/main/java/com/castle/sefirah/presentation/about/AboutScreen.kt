@@ -153,7 +153,7 @@ fun AboutScreen(rootNavController: NavController, modifier: Modifier = Modifier)
                 )
             }
 
-            item {
+            if (BuildConfig.CHECK_FOR_UPDATES) item {
                 TextPreferenceWidget(
                     title = stringResource(R.string.check_for_updates),
                     onPreferenceClick = { checkForUpdates() },

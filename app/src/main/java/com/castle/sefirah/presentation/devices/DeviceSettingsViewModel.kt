@@ -7,6 +7,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.komu.sekia.di.AppCoroutineScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -137,7 +138,7 @@ class DeviceSettingsViewModel @Inject constructor(
     }
 
     fun removeDevice() {
-        appScope.launch {
+        appScope.launch(Dispatchers.IO) {
             try {
                 networkManager.disconnect(deviceId)
             } catch (e: CancellationException) {
@@ -170,6 +171,24 @@ class DeviceSettingsViewModel @Inject constructor(
         viewModelScope.launch {
             preferencesRepository.saveMessageSyncSettingsForDevice(deviceId, enabled)
             featureManager.onPreferencesChanged(deviceId)
+        }
+    }
+
+    fun saveLongTextAsMmsSettings(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.saveLongTextAsMmsSettingsForDevice(deviceId, enabled)
+        }
+    }
+
+    fun saveGroupMessageAsMmsSettings(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.saveGroupMessageAsMmsSettingsForDevice(deviceId, enabled)
+        }
+    }
+
+    fun saveConvertToMmsAfterSettings(after: Int) {
+        viewModelScope.launch {
+            preferencesRepository.saveConvertToMmsAfterSettingsForDevice(deviceId, after)
         }
     }
 

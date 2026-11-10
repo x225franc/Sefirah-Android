@@ -122,6 +122,7 @@ class ConnectionViewModel @Inject constructor(
     }
 
     suspend fun checkForUpdate(force: Boolean = false): ReleaseRepository.Result {
+        if (!com.castle.sefirah.BuildConfig.CHECK_FOR_UPDATES) return ReleaseRepository.Result.NoNewUpdate()
         _isCheckingForUpdate.value = true
         return try {
             val result = appUpdateChecker.checkForUpdate(force)

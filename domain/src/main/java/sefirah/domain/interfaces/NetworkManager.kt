@@ -11,7 +11,7 @@ interface NetworkManager {
     suspend fun connectTo(connectionDetails: ConnectionDetails)
     suspend fun disconnect(deviceId: String)
     fun broadcastMessage(message: SocketMessage)
-    fun sendMessage(deviceId: String, message: SocketMessage)
+    fun sendMessage(deviceId: String, message: SocketMessage): Boolean
     /** Waits for the existing transport to flush the frame; does not open another connection. */
     suspend fun sendMessageAndFlush(deviceId: String, message: SocketMessage): Boolean
     suspend fun approveDeviceConnection(deviceId: String)

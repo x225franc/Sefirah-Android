@@ -16,8 +16,8 @@ android {
     defaultConfig {
         applicationId = "com.castle.sefirah"
 
-        versionCode = 35
-        versionName = "3.1.0"
+        versionCode = 38
+        versionName = "3.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         externalNativeBuild {
@@ -33,7 +33,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            buildConfigField("boolean", "CHECK_FOR_UPDATES", "false")
+        }
         release {
+            buildConfigField("boolean", "CHECK_FOR_UPDATES", "true")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

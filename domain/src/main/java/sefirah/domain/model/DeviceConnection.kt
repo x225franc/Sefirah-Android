@@ -7,6 +7,7 @@ import io.ktor.utils.io.ByteWriteChannel
 import io.ktor.utils.io.readUTF8Line
 import io.ktor.utils.io.writeStringUtf8
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -14,8 +15,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withTimeoutOrNull
 import sefirah.domain.util.ConnectionHeartbeat
 import sefirah.domain.util.HeartbeatAction
@@ -31,21 +31,49 @@ class DeviceConnection(
     private val monotonicClock: () -> Long = SystemClock::elapsedRealtime,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val mutex = Mutex()
+    private data class Outbound(val message: SocketMessage, val completion: CompletableDeferred<Boolean>? = null)
+    private val outbound = Channel<Outbound>(Channel.UNLIMITED, onUndeliveredElement = { it.completion?.complete(false) })
     private val lifecycleLock = Any()
     private val closed = AtomicBoolean(false)
     private val closeNotified = AtomicBoolean(false)
     @Volatile private var closeListener: ((DeviceConnection) -> Unit)? = null
     private val heartbeat = ConnectionHeartbeat(monotonicClock())
 
+    // One writer for both ordinary traffic and clipboard flushes; never run two send pipelines.
+    private val writer = scope.launch {
+        try {
+            for (request in outbound) {
+                var sent = false
+                try {
+                    val write = scope.async {
+                        val channel = writeChannel ?: return@async false
+                        val json = MessageSerializer.serialize(request.message) ?: return@async false
+                        channel.writeStringUtf8("$json\n")
+                        channel.flush()
+                        true
+                    }
+                    try { sent = withTimeoutOrNull(WRITE_TIMEOUT_MS) { write.await() } ?: false }
+                    finally { write.cancel() }
+                } finally {
+                    request.completion?.complete(sent)
+                    if (!sent) close()
+                }
+                if (!sent) break
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Writer failed for $deviceId", e)
+        } finally { close() }
+    }
+
     /** Monotonic time of the last received message, including heartbeats. */
     val lastActivityMillis: Long get() = heartbeat.lastActivityMillis
 
     fun heartbeatAction(nowMillis: Long = monotonicClock()): HeartbeatAction = heartbeat.nextAction(nowMillis)
 
-    fun sendMessage(message: SocketMessage) {
-        scope.launch { sendMessageAndFlush(message, WRITE_TIMEOUT_MS) }
-    }
+    fun sendMessage(message: SocketMessage): Boolean =
+        !closed.get() && outbound.trySend(Outbound(message)).isSuccess
 
     /**
      * Completes after this message is flushed, so a Disconnect can precede socket close.
@@ -54,18 +82,10 @@ class DeviceConnection(
      */
     suspend fun sendMessageAndFlush(message: SocketMessage, timeoutMillis: Long = 1_000L): Boolean {
         if (closed.get()) return false
-        val write = scope.async {
-            mutex.withLock {
-                if (closed.get()) return@withLock false
-                val channel = writeChannel ?: return@withLock false
-                val jsonMessage = MessageSerializer.serialize(message) ?: return@withLock false
-                channel.writeStringUtf8("$jsonMessage\n")
-                channel.flush()
-                true
-            }
-        }
+        val completion = CompletableDeferred<Boolean>()
+        if (!outbound.trySend(Outbound(message, completion)).isSuccess) return false
         return try {
-            val sent = withTimeoutOrNull(timeoutMillis) { write.await() } ?: false
+            val sent = withTimeoutOrNull(timeoutMillis) { completion.await() } ?: false
             if (!sent) close()
             sent
         } catch (ex: CancellationException) {
@@ -75,8 +95,6 @@ class DeviceConnection(
             Log.e(TAG, "Failed to send message to $deviceId", ex)
             close()
             false
-        } finally {
-            write.cancel()
         }
     }
 
@@ -121,6 +139,7 @@ class DeviceConnection(
     /** Closes every resource even if closing one resource fails. Safe to call repeatedly. */
     fun close() {
         if (closed.compareAndSet(false, true)) {
+            outbound.cancel()
             runCatching { sslSocket?.close() }
             runCatching { readChannel?.cancel(kotlinx.io.IOException("Connection closed")) }
             runCatching { writeChannel?.cancel(kotlinx.io.IOException("Connection closed")) }
