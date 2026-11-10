@@ -22,6 +22,7 @@ class ClipboardChangeActivity : FragmentActivity() {
     @Inject lateinit var clipboardFeature: ClipboardFeature
     private var sending = false
     private var forceRequested = false
+    private var readRequested = true
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,6 +55,7 @@ class ClipboardChangeActivity : FragmentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         forceRequested = forceRequested || intent.getBooleanExtra(EXTRA_FORCE_SEND, true)
+        readRequested = true
         if (hasWindowFocus() && !sending) sendWhenFocused()
     }
 
@@ -63,11 +65,12 @@ class ClipboardChangeActivity : FragmentActivity() {
         lifecycleScope.launch {
             try {
                 do {
+                    readRequested = false
                     val force = forceRequested
                     forceRequested = false
                     val sent = clipboardFeature.sendPrimaryClipboard(force)
                     if (force && !sent) Toast.makeText(this@ClipboardChangeActivity, R.string.clipboard_send_failed, Toast.LENGTH_LONG).show()
-                } while (forceRequested)
+                } while (readRequested || forceRequested)
             } finally {
                 finish()
             }
@@ -86,7 +89,6 @@ class ClipboardChangeActivity : FragmentActivity() {
             private set
 
         fun launch(context: Context, forceSend: Boolean = false) {
-            if (isRunning && !forceSend) return
             val intent = Intent(context, ClipboardChangeActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 putExtra(EXTRA_FORCE_SEND, forceSend)

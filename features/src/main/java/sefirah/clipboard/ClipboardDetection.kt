@@ -11,9 +11,11 @@ import android.view.accessibility.AccessibilityEvent
 import android.widget.Toast
 import sefirah.clipboard.ClipboardDetection.AEvent.Companion.copyKeyWords
 import sefirah.clipboard.extensions.StripArrayList
+import sefirah.domain.util.ClipboardActionLabels
 
 class ClipboardDetection(
-    private val copyWord: String = "Copy"
+    private val copyWord: String = "Copy",
+    private val cutWord: String = "Cut",
 ) {
     private val typeViewSelectionChangeEvent: StripArrayList<AEvent> = StripArrayList(2)
     private val eventList: StripArrayList<Int> = StripArrayList(4)
@@ -45,12 +47,9 @@ class ClipboardDetection(
          * this means if there is a text which contains "copy" it's gonna consider that as a
          * copy behaviour.
          */
-        if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED && event.text != null
-            && ((event.contentDescription?.length ?: 0) < MAX_COPY_WORD_DETECTION_LENGTH
-                    && event.contentDescription?.contains(copyWord, true) == true
-                    || ((event.text?.toString()?.length ?: 0) < MAX_COPY_WORD_DETECTION_LENGTH
-                    && event.text?.toString()?.contains(copyWord, true) == true)
-                    || event.contentDescription == "Cut" || event.contentDescription == copyWord)
+        if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED
+            && (ClipboardActionLabels.isCopyOrCut(event.contentDescription, copyWord, cutWord)
+                || event.text.orEmpty().any { ClipboardActionLabels.isCopyOrCut(it, copyWord, cutWord) })
         ) {
             Log.d(TAG, "Copy captured - 2")
             return true

@@ -14,6 +14,13 @@ import android.view.accessibility.AccessibilityEvent
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import sefirah.clipboard.extensions.LanguageDetector
 import sefirah.domain.interfaces.DeviceManager
 import sefirah.worker.WorkerManager
@@ -32,13 +39,15 @@ class ClipboardAccessibilityService : AccessibilityService() {
 
     private lateinit var clipboardDetector: ClipboardDetection
 
-    private var runForNextEventAlso = false
-    private var lastDetectionTimeMs = 0L
-    private val minDetectionInterval = 100L
+    private val detectionScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var pendingDetection: Job? = null
 
     override fun onCreate() {
         super.onCreate()
-        clipboardDetector = ClipboardDetection(LanguageDetector.getCopyForLocale(applicationContext))
+        clipboardDetector = ClipboardDetection(
+            LanguageDetector.getCopyForLocale(applicationContext),
+            LanguageDetector.getCutForLocale(applicationContext),
+        )
     }
 
     override fun onServiceConnected() {
@@ -62,27 +71,19 @@ class ClipboardAccessibilityService : AccessibilityService() {
             if (event?.eventType != null) {
                 clipboardDetector.addEvent(event.eventType)
             }
-            val currentTimeMs = System.currentTimeMillis()
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
                 clipboardDetector.getSupportedEventTypes(event)
             ) {
-                if (currentTimeMs - lastDetectionTimeMs < minDetectionInterval) {
-                    Log.d(TAG, "Ignoring duplicate detection")
-                    return
+                pendingDetection?.cancel()
+                pendingDetection = detectionScope.launch {
+                    // Let the source app finish its clipboard write before taking focus.
+                    delay(200L)
+                    if (!workerManager.isWorkerAlive() && clipboardFeature.activeDeviceIds.isNotEmpty()) {
+                        try { launchFloatingActivity() }
+                        catch (e: Exception) { Log.e(TAG, "Clipboard focus launch failed", e) }
+                    }
                 }
-
-                lastDetectionTimeMs = currentTimeMs
-                runForNextEventAlso = true
-                Log.d(TAG, "Running for first time")
-                launchFloatingActivity()
-                return
-            }
-
-            if (runForNextEventAlso) {
-                Log.d(TAG, "Running for second time")
-                runForNextEventAlso = false
-                launchFloatingActivity()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Accessibility Service Error", e)
@@ -90,6 +91,11 @@ class ClipboardAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {}
+
+    override fun onDestroy() {
+        detectionScope.cancel()
+        super.onDestroy()
+    }
 
     private fun isAnyDeviceConnected(): Boolean = runBlocking {
         deviceManager.pairedDevices.first().any {

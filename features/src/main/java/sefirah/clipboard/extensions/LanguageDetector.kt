@@ -10,6 +10,16 @@ import android.content.Context
 import android.os.Build
 
 object LanguageDetector {
+    fun getCutForLocale(context: Context): String = when (find(context)) {
+        "fr" -> "Couper"
+        "de" -> "Ausschneiden"
+        "es", "pt" -> "Cortar"
+        "it" -> "Taglia"
+        "nl" -> "Knippen"
+        "ru" -> "Вырезать"
+        else -> "Cut"
+    }
+
     fun getCopyForLocale(context: Context): String {
         val lang = find(context)
         return baseMap.getOrElse(lang) { "Copy" }

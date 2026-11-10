@@ -18,6 +18,8 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -61,7 +63,7 @@ class ClipboardFeature @Inject constructor(
     @Volatile private var logcatEnabled = false
     @Volatile private var listenerRegistered = false
     private var lastInboundSetAt = 0L
-    private var lastLogcatTriggerAt = 0L
+    private var pendingLogcatRead: Job? = null
     private val textDelivery = ClipboardDeliveryTracker()
     private val textSendMutex = Mutex()
     private var lastSentClipStamp = 0L
@@ -158,22 +160,19 @@ class ClipboardFeature @Inject constructor(
             when {
                 workerManager.isWorkerAlive() -> return@launch // worker already reports changes
                 now - lastInboundSetAt < INBOUND_ECHO_WINDOW_MS -> return@launch // our own setPrimaryClip
-                now - lastLogcatTriggerAt < LOGCAT_COOLDOWN_MS || ClipboardChangeActivity.isRunning ->
-                    return@launch
             }
-            lastLogcatTriggerAt = now
-            Log.d(TAG, "Clipboard change detected via logcat")
-
-            // No filter on ClipDescription.EXTRA_IS_SENSITIVE on purpose: sensitive clips are synced too.
-            if (sendPrimaryClipboard()) {
-                Log.d(TAG, "Read clipboard without focus")
-                return@launch
-            }
-            Log.d(TAG, "Background read returned nothing, launching focus activity")
-            try {
-                ClipboardChangeActivity.launch(context)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to launch ClipboardChangeActivity", e)
+            pendingLogcatRead?.cancel()
+            pendingLogcatRead = scope.launch {
+                // Coalesce duplicate notifications, retaining the latest copy rather than dropping
+                // every change for 1.5 seconds. Background reads here generate more denial logs.
+                delay(200L)
+                if (enabledDevices.isEmpty() || workerManager.isWorkerAlive()) return@launch
+                Log.d(TAG, "Clipboard change detected via logcat; requesting focused read")
+                try {
+                    ClipboardChangeActivity.launch(context)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to launch ClipboardChangeActivity", e)
+                }
             }
         }
     }
@@ -495,6 +494,5 @@ class ClipboardFeature @Inject constructor(
         private const val DIRECT_TRANSFER_THRESHOLD = 2 * 1024 * 1024 // 2MB
         private const val MAX_CLIPBOARD_IMAGE_BYTES = 32L * 1024 * 1024
         private const val INBOUND_ECHO_WINDOW_MS = 3_000L
-        private const val LOGCAT_COOLDOWN_MS = 1_500L
     }
 }
